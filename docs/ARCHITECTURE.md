@@ -22,6 +22,9 @@ Client ──(443, TLS ClientHello)──► haproxy reality_frontend (SNI passt
 - **sing-box:** `/usr/local/etc/sing-box/config.json`; nodes listen on `127.0.0.1` only. Each REALITY node's `handshake.server` field is its own SNI. The `sing-box` binary is expected at `/usr/local/bin/sing-box` (if it lives elsewhere, `/usr/bin/sing-box` is symlinked).
 - **Linux accounts:** in the `sshvpn` group, shell `/bin/false`, expiry set with `chage`. The `baba` menu generates random usernames/passwords.
 
+The client side of this path — request headers, the loopback-only target rule,
+and how framing is chosen — is in [PROTOCOL.md](PROTOCOL.md).
+
 ## Services
 
 | Unit | ExecStart | Hardening |

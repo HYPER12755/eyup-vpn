@@ -54,3 +54,5 @@ haproxy -c -f /etc/haproxy/haproxy.cfg
 - **Port conflict (`bind: address already in use`):** look at the "port çakışması" line in `vpnctl doctor`; the same `listen:port` cannot be used by two inbounds.
 - **REALITY "invalid connection":** the `pbk`/`sid`/SNI in the client link does not match the server config. `sblink`/`vpnctl links` produce the current `pbk`; re-import the link.
 - **SSH connection dropping:** check `journalctl -u ws` and `pgrep -af sshproxy`; re-fetch the client payload (including Sec-WebSocket-Key) from the `baba` menu.
+- **Client connects but no data flows:** a WebSocket client must send its first frame within 2 s of the handshake, otherwise `sshproxy` falls back to raw relay. See [PROTOCOL.md](PROTOCOL.md#framing-selection).
+- **`400 BadTarget`:** the `X-Real-Host` port was empty or out of range. `403 Forbidden` means the target was not loopback and no password is compiled in.

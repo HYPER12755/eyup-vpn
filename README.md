@@ -44,9 +44,28 @@ vpnctl restore <file> # restore from a backup (--yes to skip confirmation)
 | 10015 | `sshproxy` (SSH bridge, localhost) |
 | 10012 | `sshproxy` (OpenVPN-over-WS, localhost) |
 
+## Security model
+
+`sshproxy` is reachable through the public port 80, so it enforces a
+**loopback-only target rule**: unless the binary is built with a shared
+password, `X-Real-Host` must resolve to loopback (`127.0.0.0/8`, `::1`,
+`localhost`), otherwise the connection is refused with `403`. Without this it
+would be an open relay reachable by anyone.
+
+Loopback is decided by parsing the address, not by string prefix, so
+`localhost.attacker.example` and `127.0.0.1.evil` are rejected. Header names
+are matched against a line's own name field only, so a target smuggled inside
+another header's value (`Referer: .../X-Real-Host: evil`) is ignored.
+
+`sshproxy` and the REALITY inbounds bind `127.0.0.1` only — the public side is
+haproxy. SSH accounts live in the `sshvpn` group with shell `/bin/false`, so
+they can be used for tunneling but not for a login shell.
+
+See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full target-validation table.
+
 ## Client
 
 - SSH Host: `http://<host>` · Port: `80` · payload: copy it from the `baba` menu
 - REALITY: import the link from `vpnctl links <tag>` output (SNI depends on the node; the connection is made directly to IP:443)
 
-For more details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/OPERATIONS.md](docs/OPERATIONS.md).
+For more details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/OPERATIONS.md](docs/OPERATIONS.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
