@@ -73,13 +73,14 @@ func cmdStatus() int {
 			userCount += len(singbox.Users(inbound))
 		}
 	}
-	sshUsers, _ := accounts.ListUsers(appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup))
+	group := appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)
+	sshUsers, sshErr := accounts.ListUsers(group)
 
 	fmt.Printf("vpnstack %s\n", version.Full())
 	fmt.Printf("Servisler : sing-box=%s ws=%s ws-ovpn=%s haproxy=%s\n",
 		state(singboxService()), state(serviceActive("ws")), state(serviceActive("ws-ovpn")), state(serviceActive("haproxy")))
 	fmt.Printf("Inbound   : %d düğüm, %d sing-box kullanıcısı\n", inboundCount, userCount)
-	fmt.Printf("SSH       : %d hesap (%s grubu)\n", len(sshUsers), appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup))
+	fmt.Printf("SSH       : %d hesap (%s grubu)%s\n", len(sshUsers), group, sshNote(sshErr))
 	fmt.Printf("Public    : %s · REALITY: %s:443\n", appconfig.PublicHost(), appconfig.RealityHost())
 	if err != nil {
 		fmt.Printf("%sconfig okunamadı:%s %v\n", colorRed, colorReset, err)
@@ -89,6 +90,13 @@ func cmdStatus() int {
 }
 
 func singboxService() bool { return serviceActive("sing-box") }
+
+func sshNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return " · " + colorRed + err.Error() + colorReset
+}
 
 func state(active bool) string {
 	if active {
@@ -172,9 +180,29 @@ func cmdDoctor() int {
 			return true, fmt.Sprintf("%d düğüm tekil", len(seen))
 		}),
 		runCheck("REALITY anahtarları", func() (bool, string) {
+			config, err := singbox.Load()
+			if err != nil {
+				return false, err.Error()
+			}
+			inbounds := singbox.Inbounds(config)
+			// A deployment with only TLS inbounds has no keys to show; that is
+			// a valid configuration, not a fault.
+			wantsReality := false
+			for _, inbound := range inbounds {
+				if singbox.BoolField(singbox.Reality(inbound), "enabled") {
+					wantsReality = true
+					break
+				}
+			}
 			keys := singbox.RealityKeys()
+			if !wantsReality {
+				if len(keys) > 0 {
+					return true, fmt.Sprintf("%d anahtar (REALITY inbound yok)", len(keys))
+				}
+				return true, "REALITY inbound yok"
+			}
 			if len(keys) == 0 {
-				return false, "türetilebilir anahtar yok"
+				return false, "REALITY inbound var ancak anahtar türetilemiyor"
 			}
 			return true, fmt.Sprintf("%d anahtar", len(keys))
 		}),
@@ -235,9 +263,13 @@ func cmdLinks(args []string) int {
 
 func cmdUsers() int {
 	group := appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)
-	sshUsers, _ := accounts.ListUsers(group)
+	sshUsers, sshErr := accounts.ListUsers(group)
 	sort.Strings(sshUsers)
-	fmt.Printf("SSH hesapları (%s): %d\n", group, len(sshUsers))
+	if sshErr != nil {
+		fmt.Printf("SSH hesapları (%s): okunamadı — %v\n", group, sshErr)
+	} else {
+		fmt.Printf("SSH hesapları (%s): %d\n", group, len(sshUsers))
+	}
 	for _, user := range sshUsers {
 		fmt.Printf("  %-12s %s\n", user, accounts.Expiry(user))
 	}
@@ -290,7 +322,9 @@ func cmdBackup(args []string) int {
 		}
 	}
 
-	if users, _ := accounts.ListUsers(appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)); users != nil {
+	if users, err := accounts.ListUsers(appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)); err != nil {
+		fmt.Printf("uyarı: SSH kullanıcı listesi alınamadı: %v\n", err)
+	} else {
 		content := strings.Join(users, "\n") + "\n"
 		_ = tarWriter.WriteHeader(&tar.Header{Name: "sshvpn/users.txt", Mode: 0o600, Size: int64(len(content)), ModTime: time.Now()})
 		_, _ = tarWriter.Write([]byte(content))

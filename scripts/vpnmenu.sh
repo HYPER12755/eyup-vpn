@@ -60,15 +60,22 @@ ensure_group() {
 
 random_username() {
   local name
-  while true; do
+  command -v openssl >/dev/null 2>&1 || { echo -e "${RED}openssl bulunamadı.${NC}" >&2; return 1; }
+  for _ in $(seq 1 20); do
     name="$(openssl rand -base64 24 2>/dev/null | tr -dc 'a-z0-9' | cut -c1-6)"
-    [[ "${name}" =~ ^[a-z] ]] || continue
-    id -u "${name}" >/dev/null 2>&1 || { echo "${name}"; return; }
+    if [[ "${name}" =~ ^[a-z] ]] && ! id -u "${name}" >/dev/null 2>&1; then
+      echo "${name}"
+      return 0
+    fi
   done
+  return 1
 }
 
 random_password() {
-  openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-8
+  local password
+  password="$(openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-8)"
+  [[ -n "${password}" ]] || return 1
+  echo "${password}"
 }
 
 random_free_port() {
@@ -127,8 +134,8 @@ create_account() {
 
   save_menu_conf
 
-  username="$(random_username)"
-  password="$(random_password)"
+  username="$(random_username)" || { echo -e "${RED} kullanıcı adı üretilemedi.${NC}"; return 1; }
+  password="$(random_password)" || { echo -e "${RED}Şifre üretilemedi.${NC}"; return 1; }
 
   if [[ "${days}" -eq 0 ]]; then
     expiry="-1"
@@ -140,8 +147,17 @@ create_account() {
     echo -e "${RED}Hesap oluşturulamadı.${NC}"
     return 1
   fi
-  echo "${username}:${password}" | chpasswd
-  chage -E "${expiry}" -M 99999 "${username}" >/dev/null 2>&1
+  # chpasswd/chage başarısız olursa hesap yarım kalmasın: geri al.
+  if ! echo "${username}:${password}" | chpasswd 2>/dev/null; then
+    userdel "${username}" 2>/dev/null
+    echo -e "${RED}Şifre atanamadı, hesap oluşturulmadı.${NC}"
+    return 1
+  fi
+  if ! chage -E "${expiry}" -M 99999 "${username}" >/dev/null 2>&1; then
+    userdel "${username}" 2>/dev/null
+    echo -e "${RED}Süre atanamadı, hesap oluşturulmadı.${NC}"
+    return 1
+  fi
 
   local host expires_text
   host="$(client_host)"
@@ -221,6 +237,12 @@ delete_account() {
     echo -e "${RED}Kullanıcı bulunamadı: ${username}${NC}"
     return
   fi
+  # Yalnızca ${GROUP} üyesi silinebilir; aksi halde bir yazım hatası sistem
+  # hesabını siler.
+  if [[ ",${members// /}," != *",${username},"* ]]; then
+    echo -e "${RED}${username}, ${GROUP} grubunda değil — silinmedi.${NC}"
+    return
+  fi
 
   local answer
   read -r -p "$(echo -e "${YELLOW}${username} silinsin mi? (e/H):${NC} ")" answer
@@ -287,7 +309,9 @@ singbox_apply_inbound() {
   singbox_ensure_config
 
   local tmp
-  tmp="$(mktemp)"
+  # Hedefle aynı dosya sisteminde olmalı: /tmp ayrı bir mount ise mv kopyalayıp
+  # siler ve kesinti sonrası kırpık config.json bırakır.
+  tmp="$(mktemp "${SINGBOX_CONFIG}.XXXXXX")"
   if ! jq --argjson inb "${inbound}" '.inbounds = ((.inbounds // []) + [$inb])' "${SINGBOX_CONFIG}" > "${tmp}"; then
     echo -e "${RED}Config güncellenemedi.${NC}"
     rm -f "${tmp}"
@@ -439,7 +463,7 @@ singbox_delete_inbound() {
   read -r -p "Silinecek tag: " tag
   [[ -n "${tag}" ]] || return
 
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${SINGBOX_CONFIG}.XXXXXX")"
   if ! jq --arg tag "${tag}" '.inbounds |= map(select(.tag != $tag))' "${SINGBOX_CONFIG}" > "${tmp}"; then
     rm -f "${tmp}"
     return

@@ -33,14 +33,24 @@ func EnsureGroup(group string) error {
 	return exec.Command("groupadd", "-f", group).Run()
 }
 
+// ListUsers returns the members of group. A missing group and a failing
+// getent are reported as errors so callers can tell them apart from a group
+// that simply has no members yet.
 func ListUsers(group string) ([]string, error) {
 	output, err := exec.Command("getent", "group", group).Output()
 	if err != nil {
-		return nil, nil
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+			return nil, fmt.Errorf("grup yok: %s", group)
+		}
+		return nil, fmt.Errorf("getent group %s: %w", group, err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(output)), ":")
-	if len(parts) < 4 || parts[3] == "" {
-		return nil, nil
+	if len(parts) < 4 {
+		return nil, fmt.Errorf("getent group %s: beklenmeyen çıktı", group)
+	}
+	if parts[3] == "" {
+		return []string{}, nil
 	}
 	return strings.Split(parts[3], ","), nil
 }

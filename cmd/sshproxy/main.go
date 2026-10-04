@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,9 @@ import (
 
 const (
 	bufLen        = 4096 * 4
+	maxHeadLen    = 64 * 1024
+	headerTimeout = 10 * time.Second
+	splitTimeout  = 2 * time.Second
 	selectTimeout = 3 * time.Second
 	idleTicks     = 60
 	defaultHost   = "127.0.0.1:109"
@@ -77,7 +81,12 @@ func main() {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			continue
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			slog.Error("sshproxy: accept failed", "err", err)
+			return
 		}
 		go handleConn(conn, listenPort)
 	}
@@ -90,14 +99,35 @@ func printUsage() {
 	fmt.Println("       sshproxy -b 0.0.0.0 -p 80")
 }
 
+// readHead reads the request head up to the blank line and leaves anything the
+// client pipelined behind it in the reader, so the forwarding loop still sees
+// the first payload bytes.
+func readHead(reader *bufio.Reader, conn net.Conn) (string, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(headerTimeout))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	var head strings.Builder
+	for head.Len() < maxHeadLen {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		head.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			return head.String(), nil
+		}
+	}
+	return "", errors.New("sshproxy: request head too large")
+}
+
 func handleConn(client net.Conn, listenPort int) {
-	clientBuffer := make([]byte, bufLen)
-	n, err := client.Read(clientBuffer)
+	reader := bufio.NewReader(client)
+
+	head, err := readHead(reader, client)
 	if err != nil {
 		_ = client.Close()
 		return
 	}
-	head := string(clientBuffer[:n])
 
 	hostPort := findHeader(head, "X-Real-Host")
 	if hostPort == "" {
@@ -105,30 +135,32 @@ func handleConn(client net.Conn, listenPort int) {
 	}
 
 	if findHeader(head, "X-Split") != "" {
-		extra := make([]byte, bufLen)
-		_, _ = client.Read(extra)
+		// X-Split means the client's first data packet arrives separately. The
+		// wait is bounded so a client that blocks on our 101 cannot deadlock.
+		_ = client.SetReadDeadline(time.Now().Add(splitTimeout))
+		_, _ = reader.Read(make([]byte, bufLen))
+		_ = client.SetReadDeadline(time.Time{})
 	}
 
-	if hostPort == "" {
-		_, _ = client.Write([]byte("HTTP/1.1 400 NoXRealHost!\r\n\r\n"))
-		_ = client.Close()
-		return
-	}
-
-	password := findHeader(head, "X-Pass")
-	if pass != "" && password == pass {
-		// password mode: any target allowed
-	} else if pass != "" && password != pass {
-		_, _ = client.Write([]byte("HTTP/1.1 400 WrongPass!\r\n\r\n"))
-		_ = client.Close()
-		return
+	if pass != "" {
+		if findHeader(head, "X-Pass") != pass {
+			_, _ = client.Write([]byte("HTTP/1.1 400 WrongPass!\r\n\r\n"))
+			_ = client.Close()
+			return
+		}
 	} else if !isLocalHost(hostPort) {
 		_, _ = client.Write([]byte("HTTP/1.1 403 Forbidden!\r\n\r\n"))
 		_ = client.Close()
 		return
 	}
 
-	targetAddr := targetAddress(hostPort, listenPort)
+	targetAddr, err := targetAddress(hostPort)
+	if err != nil {
+		_, _ = client.Write([]byte("HTTP/1.1 400 BadTarget!\r\n\r\n"))
+		_ = client.Close()
+		return
+	}
+
 	target, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
 		slog.Warn("sshproxy: dial target failed", "client", client.RemoteAddr().String(), "target", hostPort, "err", err)
@@ -144,12 +176,11 @@ func handleConn(client net.Conn, listenPort int) {
 		return
 	}
 
-	reader := bufio.NewReader(client)
 	if findHeader(head, "Sec-WebSocket-Key") != "" {
 		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, peekErr := reader.Peek(1)
 		_ = client.SetReadDeadline(time.Time{})
-		if peekErr == nil && !detectWebSocket(reader) {
+		if peekErr != nil || !detectWebSocket(reader) {
 			proxy(client, reader, target)
 			return
 		}
@@ -159,21 +190,34 @@ func handleConn(client net.Conn, listenPort int) {
 	proxy(client, reader, target)
 }
 
+// isLocalHost reports whether hostPort points at the loopback interface. It
+// compares parsed addresses rather than prefixes, so names such as
+// "localhost.attacker.example" are not accepted.
 func isLocalHost(hostPort string) bool {
-	return strings.HasPrefix(hostPort, "127.0.0.1") || strings.HasPrefix(hostPort, "localhost")
+	host := hostPort
+	if index := strings.Index(hostPort, ":"); index != -1 {
+		host = hostPort[:index]
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
-func targetAddress(hostPort string, listenPort int) string {
+func targetAddress(hostPort string) (string, error) {
 	index := strings.Index(hostPort, ":")
 	if index == -1 {
-		return net.JoinHostPort(hostPort, strconv.Itoa(443))
+		return net.JoinHostPort(hostPort, strconv.Itoa(443)), nil
 	}
 	host := hostPort[:index]
 	port, err := strconv.Atoi(hostPort[index+1:])
 	if err != nil || port < 1 || port > 65535 {
-		return net.JoinHostPort(host, strconv.Itoa(listenPort))
+		return "", fmt.Errorf("sshproxy: geçersiz hedef %q", hostPort)
 	}
-	return net.JoinHostPort(host, strconv.Itoa(port))
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func findHeader(head, header string) string {

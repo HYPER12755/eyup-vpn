@@ -1,52 +1,52 @@
 # VpnStack
 
-Go ile yazılmış SSH WebSocket/Payload köprüsü, sing-box (VLESS/REALITY) yönetimi ve terminal menüsünden oluşan hafif VPN yönetim yığını.
+A lightweight VPN management stack written in Go, consisting of an SSH WebSocket/payload bridge, sing-box (VLESS/REALITY) management, and a terminal menu.
 
-## Bileşenler
+## Components
 
-| Bileşen | Görev | Konum |
+| Component | Task | Location |
 |---|---|---|
-| `sshproxy` | Eski `ws.py`'nin Go portu: X-Real-Host / X-Split / X-Pass destekli SSH köprüsü + gerçek WebSocket (Cloudflare uyumlu) | `/usr/local/bin/sshproxy` |
-| `baba` (`vpnmenu`) | Terminal menüsü: otomatik SSH hesabı, liste/silme, istemci ayarları | `/usr/local/bin/baba` |
-| `singbox` | Topluluk sing-box yöneticisi (düğüm/kullanıcı ekleme) | `/usr/local/bin/singbox` |
-| `sblink` | REALITY public key türetir (`tag=pbk`) | `/usr/local/bin/sblink` |
-| `vpnctl` | Sağlık kontrolü, durum, link, yedek/geri yükleme | `/usr/local/bin/vpnctl` |
-| `haproxy` | 80: WS/SSH ön uç · 443: SNI passthrough (REALITY) | sistem |
-| `dropbear`/`sshd` | SSH kimlik doğrulaması | sistem |
+| `sshproxy` | Go port of the legacy `ws.py`: SSH bridge supporting X-Real-Host / X-Split / X-Pass + real WebSocket (Cloudflare compatible) | `/usr/local/bin/sshproxy` |
+| `baba` (`vpnmenu`) | Terminal menu: automatic SSH account setup, list/delete, client settings | `/usr/local/bin/baba` |
+| `singbox` | Community sing-box manager (add node/user) | `/usr/local/bin/singbox` |
+| `sblink` | Derives the REALITY public key (`tag=pbk`) | `/usr/local/bin/sblink` |
+| `vpnctl` | Health check, status, links, backup/restore | `/usr/local/bin/vpnctl` |
+| `haproxy` | 80: WS/SSH frontend · 443: SNI passthrough (REALITY) | system |
+| `dropbear`/`sshd` | SSH authentication | system |
 
-## Kurulum
+## Installation
 
 ```bash
 sudo bash install.sh
 ```
 
-Gereksinim: Ubuntu 22.04/24.04, root. Script bağımlılıkları kurar, sing-box + Go kurar, haproxy yapılandırmasını (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`) ve servisleri (ws, ws-ovpn, haproxy, sing-box, fail2ban) yerleştirir.
+Requirements: Ubuntu 22.04/24.04, root. The script installs dependencies, sets up sing-box + Go, deploys the haproxy configuration (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`), and installs the services (ws, ws-ovpn, haproxy, sing-box, fail2ban).
 
-## Kullanım
+## Usage
 
 ```bash
-baba                  # terminal menüsü (SSH hesapları + istemci ayarları)
-singbox               # sing-box düğüm/kullanıcı yönetimi
-vpnctl status         # genel durum
-vpnctl doctor         # sağlık kontrolü (sorun varsa çıkış kodu 1)
-vpnctl links          # tüm inbound kullanıcı linkleri
-vpnctl users          # SSH + sing-box kullanıcıları
-vpnctl backup         # /root/vpnstack-backup altına yedek
-vpnctl restore <file> # yedekten geri yükle (--yes ile onaysız)
+baba                  # terminal menu (SSH accounts + client settings)
+singbox               # sing-box node/user management
+vpnctl status         # overall status
+vpnctl doctor         # health check (exit code 1 if anything is wrong)
+vpnctl links          # all inbound user links
+vpnctl users          # SSH + sing-box users
+vpnctl backup         # backup to /root/vpnstack-backup
+vpnctl restore <file> # restore from a backup (--yes to skip confirmation)
 ```
 
-## Portlar
+## Ports
 
-| Port | Ne |
+| Port | What |
 |---|---|
-| 80 | haproxy → `GET`/`CONNECT` istekleri 10015'e (WS), diğer SSH trafiği dropbear'a (143) |
-| 443 | haproxy SNI passthrough → REALITY düğümleri (localhost 1443-1447) |
-| 10015 | `sshproxy` (SSH köprüsü, localhost) |
+| 80 | haproxy → routes `GET`/`CONNECT` requests to 10015 (WS), other SSH traffic to dropbear (143) |
+| 443 | haproxy SNI passthrough → REALITY nodes (localhost 1443-1447) |
+| 10015 | `sshproxy` (SSH bridge, localhost) |
 | 10012 | `sshproxy` (OpenVPN-over-WS, localhost) |
 
-## İstemci
+## Client
 
-- SSH Host: `http://<host>` · Port: `80` · payload: `baba` menüsünden kopyala
-- REALITY: `vpnctl links <tag>` çıktısındaki linki içe aktar (SNI düğüme göre; bağlantı doğrudan IP:443'e yapılır)
+- SSH Host: `http://<host>` · Port: `80` · payload: copy it from the `baba` menu
+- REALITY: import the link from `vpnctl links <tag>` output (SNI depends on the node; the connection is made directly to IP:443)
 
-Daha fazla ayrıntı: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/OPERATIONS.md](docs/OPERATIONS.md).
+For more details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/OPERATIONS.md](docs/OPERATIONS.md).

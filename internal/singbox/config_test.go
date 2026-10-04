@@ -2,6 +2,7 @@ package singbox
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,4 +118,66 @@ func TestAddAndRemoveUser(t *testing.T) {
 	if len(Users(Inbounds(config)[0])) != 1 {
 		t.Fatalf("kullanıcı silinmedi")
 	}
+}
+
+func TestBuildLinkRealityCarriesParameters(t *testing.T) {
+	config := parseConfig(t, sampleConfig)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("link is not parseable: %v", err)
+	}
+	query := parsed.Query()
+	for key, want := range map[string]string{
+		"type": "tcp", "security": "reality", "sni": "whatsapp.net",
+		"fp": "chrome", "sid": "abcd1234", "flow": "xtls-rprx-vision",
+	} {
+		if got := query.Get(key); got != want {
+			t.Errorf("query %s = %q, want %q", key, got, want)
+		}
+	}
+	if query.Get("pbk") == "" {
+		t.Error("pbk must be present for a REALITY inbound")
+	}
+	if parsed.Port() != "443" {
+		t.Errorf("loopback REALITY must publish on 443, got %q", parsed.Port())
+	}
+}
+
+func TestBuildLinkEscapesValues(t *testing.T) {
+	const tricky = `{
+	  "inbounds": [{
+	    "type": "vless", "tag": "my node/1", "listen": "127.0.0.1", "listen_port": 1443,
+	    "users": [{"name": "user1", "uuid": "11111111-1111-1111-1111-111111111111"}],
+	    "transport": {"type": "ws", "path": "/p?a=1&b=2"},
+	    "tls": {"enabled": true, "server_name": "a.example.com"}
+	  }],
+	  "outbounds": [], "route": {"final": "direct"}
+	}`
+	config := parseConfig(t, tricky)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("link is not parseable: %v", err)
+	}
+	// The embedded '?' and '&' in the path must stay inside the path value.
+	if got := parsed.Query().Get("path"); got != "/p?a=1&b=2" {
+		t.Errorf("path = %q, want %q", got, "/p?a=1&b=2")
+	}
+	if parsed.Fragment != "my node/1" {
+		t.Errorf("fragment = %q, want %q", parsed.Fragment, "my node/1")
+	}
+}
+
+func parseConfig(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var config map[string]any
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatal(err)
+	}
+	return config
 }

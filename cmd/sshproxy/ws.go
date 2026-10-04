@@ -8,9 +8,14 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 )
 
-const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const (
+	wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	// RFC 6455 §5.5: control frames carry at most 125 bytes of payload.
+	maxControlPayload = 125
+)
 
 func websocketAccept(key string) string {
 	hash := sha1.Sum([]byte(key + wsGUID))
@@ -88,8 +93,23 @@ func writeFrame(writer io.Writer, opcode byte, payload []byte) error {
 	return err
 }
 
+// frameWriter serialises writes to the client socket. Both the forwarding and
+// the control-frame goroutines emit frames, and writeFrame issues two writes
+// per frame, so without this a PONG can splice itself into a data frame.
+type frameWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (f *frameWriter) write(opcode byte, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return writeFrame(f.w, opcode, payload)
+}
+
 func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 	done := make(chan struct{}, 2)
+	frames := &frameWriter{w: client}
 
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -97,7 +117,7 @@ func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 		for {
 			n, err := target.Read(buffer)
 			if n > 0 {
-				if writeErr := writeFrame(client, 0x2, buffer[:n]); writeErr != nil {
+				if writeErr := frames.write(0x2, buffer[:n]); writeErr != nil {
 					return
 				}
 			}
@@ -116,10 +136,13 @@ func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 			}
 			switch opcode {
 			case 0x8:
-				_ = writeFrame(client, 0x8, nil)
+				_ = frames.write(0x8, nil)
 				return
 			case 0x9:
-				if err := writeFrame(client, 0xA, payload); err != nil {
+				if len(payload) > maxControlPayload {
+					return
+				}
+				if err := frames.write(0xA, payload); err != nil {
 					return
 				}
 			case 0xA:

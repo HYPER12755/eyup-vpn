@@ -1,48 +1,48 @@
-# Operasyon
+# Operations
 
-## Günlük işler
+## Routine tasks
 
 ```bash
-baba                # SSH hesabı oluştur / listele / sil, istemci host+header ayarı
-singbox             # sing-box düğüm (protocol+SNI) ve kullanıcı yönetimi
-vpnctl doctor       # servis/port/config/REALITY kontrolü
-vpnctl status       # özet
+baba                # create / list / delete SSH accounts, set the client host+header
+singbox             # sing-box node (protocol+SNI) and user management
+vpnctl doctor       # service/port/config/REALITY checks
+vpnctl status       # summary
 ```
 
-## Yedekleme ve geri yükleme
+## Backup and restore
 
 ```bash
-vpnctl backup                 # /root/vpnstack-backup/vpnstack-<tarih>.tar.gz
-vpnctl restore <dosya>        # onay ister
-vpnctl restore <dosya> --yes  # onaysız
+vpnctl backup                 # /root/vpnstack-backup/vpnstack-<date>.tar.gz
+vpnctl restore <file>         # asks for confirmation
+vpnctl restore <file> --yes   # no confirmation
 ```
 
-Yedek içeriği: `sing-box/config.json`, `sing-box/phone_client.json`, `sshvpn/menu.conf`, SSH kullanıcı listesi, sürüm metadata'sı. Geri yüklemede config `sing-box check` ile doğrulanmadan yerine konmaz.
+Backup contents: `sing-box/config.json`, `sing-box/phone_client.json`, `sshvpn/menu.conf`, the SSH user list, and version metadata. On restore, the config is not put in place unless `sing-box check` passes.
 
-## REALITY düğümü ekleme (özet)
+## Adding a REALITY node (summary)
 
-1. `singbox` menüsünden protokolü seç (VLESS + REALITY), port olarak **1443-1499 aralığında boş** bir localhost portu ver. Menü bu aralıkta boş bir port önerir, seçilen portu doğrular ve düğümü `127.0.0.1` üzerinde dinler (dışarıya açılmaz).
-2. SNI olarak hedef alan adını gir (örn. `m.youtube.com`).
-3. `vpnctl links <tag>` ile linki al; istemci doğrudan **IP:443** ile bağlanır (Cloudflare proxy'li alan adı REALITY taşımaz). Menü de linki bu şekilde üretir.
+1. Pick the protocol from the `singbox` menu (VLESS + REALITY) and give it a **free localhost port in the 1443-1499 range**. The menu suggests a free port in that range, validates the one you pick, and makes the node listen on `127.0.0.1` (not exposed externally).
+2. Enter the target domain as the SNI (e.g. `m.youtube.com`).
+3. Get the link with `vpnctl links <tag>`; the client connects directly to **IP:443** (a Cloudflare-proxied domain cannot carry REALITY). The menu generates the link this way as well.
 
-Yeni SNI'yı 443'e yönlendirmek için `/etc/haproxy/haproxy.cfg` içindeki `reality_frontend` bölümüne ekleyin: `use_backend re_<ad>_backend if { req.ssl_sni -i <sni> }` ve ilgili backend'i `127.0.0.1:<port>` ile tanımlayın; sonra `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy`.
+To route a new SNI to 443, add this line to the `reality_frontend` section of `/etc/haproxy/haproxy.cfg`: `use_backend re_<name>_backend if { req.ssl_sni -i <sni> }`, define the matching backend with `127.0.0.1:<port>`, then run `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy`.
 
-## haproxy yapılandırması
+## haproxy configuration
 
-`/etc/haproxy/haproxy.cfg`, depodaki `deploy/haproxy.cfg` sürümünden gelir. `install.sh` mevcut dosyayı yalnızca **yoksa** ya da paketin stok şablonuysa değiştirir; elle eklediğiniz REALITY/SNI satırları korunur (stok şablon değiştirilirse `.vpnstack-backup` yedeği alınır).
+`/etc/haproxy/haproxy.cfg` comes from the `deploy/haproxy.cfg` version in the repo. `install.sh` only replaces the existing file if it is **absent** or is the distribution's stock template, so REALITY/SNI lines you added by hand are preserved (if the stock template is replaced, a `.vpnstack-backup` copy is taken first).
 
-Kaynak dosya güncellendikten sonra türetmek için:
+To derive a new config after updating the source file:
 
 ```bash
-sudo cp deploy/haproxy.cfg /etc/haproxy/haproxy.cfg   # elle eklediğiniz satırları kaybedersiniz
+sudo cp deploy/haproxy.cfg /etc/haproxy/haproxy.cfg   # you will lose lines you added by hand
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy
 ```
 
-## Doğrudan SSH portları
+## Direct SSH ports
 
-`127.0.0.1:109` (sshproxy hedefi) ve `127.0.0.1:143` (haproxy `dropbear_backend`) dinlemiyorsa `install.sh` uyarı verir. WebSocket yolu (10015/80) bunlara ihtiyaç duymaz; yalnızca ham SSH kullanacaksanız dropbear'ı bu portlarda yapılandırın.
+If `127.0.0.1:109` (the sshproxy target) and `127.0.0.1:143` (haproxy's `dropbear_backend`) are not listening, `install.sh` warns you. The WebSocket path (10015/80) does not need them; configure dropbear on these ports only if you intend to use raw SSH.
 
-## Sorun giderme
+## Troubleshooting
 
 ```bash
 vpnctl doctor
@@ -51,6 +51,6 @@ journalctl -u sing-box -n 50 --no-pager
 haproxy -c -f /etc/haproxy/haproxy.cfg
 ```
 
-- **Port çakışması (`bind: address already in use`):** `vpnctl doctor` "port çakışması" satırına bakın; aynı `listen:port` iki inbound'da olamaz.
-- **REALITY "invalid connection":** istemci linkindeki `pbk`/`sid`/SNI ile sunucu config'i uyuşmuyor. `sblink`/`vpnctl links` güncel `pbk` üretir; linki yeniden içe aktarın.
-- **SSH bağlantısı kopuyor:** `journalctl -u ws` ve `pgrep -af sshproxy`; `baba` menüsünden istemci payload'ını (Sec-WebSocket-Key dahil) yeniden alın.
+- **Port conflict (`bind: address already in use`):** look at the "port çakışması" line in `vpnctl doctor`; the same `listen:port` cannot be used by two inbounds.
+- **REALITY "invalid connection":** the `pbk`/`sid`/SNI in the client link does not match the server config. `sblink`/`vpnctl links` produce the current `pbk`; re-import the link.
+- **SSH connection dropping:** check `journalctl -u ws` and `pgrep -af sshproxy`; re-fetch the client payload (including Sec-WebSocket-Key) from the `baba` menu.

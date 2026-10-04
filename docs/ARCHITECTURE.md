@@ -1,39 +1,39 @@
-# Mimari
+# Architecture
 
 ```
-İstemci ──(80, HTTP+WS)──► haproxy http_frontend ──► sshproxy :10015 ──► dropbear :109 / sshd :22
-                              │ (Upgrade yoksa)         (ham veya WS çerçeveli)
-                              └──────────────────────► dropbear :143
+Client ──(80, HTTP+WS)──► haproxy http_frontend ──► sshproxy :10015 ──► dropbear :109 / sshd :22
+                             │ (no Upgrade)           (raw or WS framed)
+                             └──────────────────────► dropbear :143
 
-İstemci ──(443, TLS ClientHello)──► haproxy reality_frontend (SNI passthrough)
-                                        ├─ whatsapp.net   → sing-box :1443
-                                        ├─ speedtest.net  → sing-box :1444
-                                        ├─ chatgpt.com    → sing-box :1445
-                                        ├─ m.youtube.com  → sing-box :1446
-                                        └─ i.instagram.com→ sing-box :1447
+Client ──(443, TLS ClientHello)──► haproxy reality_frontend (SNI passthrough)
+                                       ├─ whatsapp.net   → sing-box :1443
+                                       ├─ speedtest.net  → sing-box :1444
+                                       ├─ chatgpt.com    → sing-box :1445
+                                       ├─ m.youtube.com  → sing-box :1446
+                                       └─ i.instagram.com→ sing-box :1447
 ```
 
-## Bileşenler
+## Components
 
-- **sshproxy (Go):** `ws.py` muadili. İlk pakette `X-Real-Host`, `X-Split`, `X-Pass` başlıklarını okur; `101` yanıtı verir. `Sec-WebSocket-Key` varsa gerçek WebSocket çerçevesi (Cloudflare uyumlu), yoksa ham TCP aktarır. İki kopya: `ws.service` (10015) ve `ws-ovpn.service` (10012).
-- **haproxy:** Yapılandırma `deploy/haproxy.cfg` kaynağından `/etc/haproxy/haproxy.cfg` olarak kurulur.
-  - `http_frontend` (80/8080): **saf TCP**. `tcp-request content accept if HTTP` ile ilk baytlar yoklanır; `GET`/`CONNECT` ile başlayan istekler `ws_backend` (10015), diğerleri (ham `SSH-2.0-...`) `dropbear_backend` (143). Başlıklar ayrıştırılmadığı için `X-Real-Host`/`X-Split` olduğu gibi kalır.
-  - `reality_frontend` (443): TLS ClientHello SNI'sına göre REALITY düğümlerine TCP passthrough. Bilinmeyen SNI → whatsapp düğümü (maskeleme korunur).
-- **sing-box:** `/usr/local/etc/sing-box/config.json`; düğümler yalnızca `127.0.0.1` üzerinde dinler. Her REALITY düğümünün `handshake.server` alanı kendi SNI'sidir. `sing-box` ikilisi `/usr/local/bin/sing-box` beklenir (yoksa `/usr/bin/sing-box` sembolik bağlanır).
-- **Linux hesapları:** `sshvpn` grubunda, kabuk `/bin/false`, süre `chage` ile. `baba` menüsü rastgele kullanıcı adı/şifre üretir.
+- **sshproxy (Go):** the equivalent of `ws.py`. On the first packet it reads the `X-Real-Host`, `X-Split` and `X-Pass` headers and replies `101`. If `Sec-WebSocket-Key` is present it uses a real WebSocket frame (Cloudflare compatible), otherwise it relays raw TCP. Two instances: `ws.service` (10015) and `ws-ovpn.service` (10012).
+- **haproxy:** the configuration is installed from the `deploy/haproxy.cfg` source to `/etc/haproxy/haproxy.cfg`.
+  - `http_frontend` (80/8080): **pure TCP**. The first bytes are inspected with `tcp-request content accept if HTTP`; requests starting with `GET`/`CONNECT` go to `ws_backend` (10015), the rest (raw `SSH-2.0-...`) to `dropbear_backend` (143). Since headers are not parsed, `X-Real-Host`/`X-Split` pass through untouched.
+  - `reality_frontend` (443): TCP passthrough to the REALITY nodes based on the TLS ClientHello SNI. Unknown SNI → the whatsapp node (camouflage is preserved).
+- **sing-box:** `/usr/local/etc/sing-box/config.json`; nodes listen on `127.0.0.1` only. Each REALITY node's `handshake.server` field is its own SNI. The `sing-box` binary is expected at `/usr/local/bin/sing-box` (if it lives elsewhere, `/usr/bin/sing-box` is symlinked).
+- **Linux accounts:** in the `sshvpn` group, shell `/bin/false`, expiry set with `chage`. The `baba` menu generates random usernames/passwords.
 
-## Servisler
+## Services
 
-| Unit | ExecStart | Sertleştirme |
+| Unit | ExecStart | Hardening |
 |---|---|---|
-| `ws.service` | `sshproxy 10015` | CapabilityBoundingSet boş, ProtectSystem=strict, PrivateTmp/Devices, RestrictAddressFamilies |
-| `ws-ovpn.service` | `sshproxy 10012` | aynı |
-| `sing-box.service` | sing-box yöneticisi tarafından yönetilir | — |
-| `haproxy.service` | 80/443 ön uç | — |
+| `ws.service` | `sshproxy 10015` | Empty CapabilityBoundingSet, ProtectSystem=strict, PrivateTmp/Devices, RestrictAddressFamilies |
+| `ws-ovpn.service` | `sshproxy 10012` | same |
+| `sing-box.service` | managed by the sing-box manager | — |
+| `haproxy.service` | 80/443 frontend | — |
 | `fail2ban.service` | sshd (+dropbear) jails | — |
 
-## Veri ve yedekler
+## Data and backups
 
 - sing-box config: `/usr/local/etc/sing-box/config.json`
-- İstemci ayarları: `/etc/sshvpn/menu.conf` (`FAKE_HOST`, `EXTRA_HEADER`)
-- Yedek: `vpnctl backup` → `/root/vpnstack-backup/vpnstack-*.tar.gz` (config + menu.conf + SSH kullanıcı listesi + meta)
+- Client settings: `/etc/sshvpn/menu.conf` (`FAKE_HOST`, `EXTRA_HEADER`)
+- Backup: `vpnctl backup` → `/root/vpnstack-backup/vpnstack-*.tar.gz` (config + menu.conf + SSH user list + meta)

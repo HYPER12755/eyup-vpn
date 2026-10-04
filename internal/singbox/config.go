@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,7 @@ var (
 	}
 	Validate = func(path string) error {
 		if _, err := os.Stat(Binary); err != nil {
-			return nil
+			return fmt.Errorf("sing-box ikilisi bulunamadı: %s", Binary)
 		}
 		if output, err := exec.Command(Binary, "check", "-c", path).CombinedOutput(); err != nil {
 			return fmt.Errorf("config doğrulaması başarısız: %s", strings.TrimSpace(string(output)))
@@ -212,7 +213,9 @@ func IsLoopback(inbound map[string]any) bool {
 
 func buildQuery(inbound map[string]any, user map[string]any) string {
 	network := "tcp"
-	if transport := Transport(inbound); transport != nil {
+	var transport map[string]any
+	if value := Transport(inbound); value != nil {
+		transport = value
 		if value := StringField(transport, "type"); value != "" {
 			network = value
 		}
@@ -222,23 +225,33 @@ func buildQuery(inbound map[string]any, user map[string]any) string {
 	reality := Reality(inbound)
 	sni := StringField(tls, "server_name")
 
-	query := "type=" + network + "&security=none"
+	query := "type=" + url.QueryEscape(network) + "&security=none"
 	if BoolField(tls, "enabled") {
-		query = "type=" + network + "&security=tls&sni=" + sni
+		query = "type=" + url.QueryEscape(network) + "&security=tls&sni=" + url.QueryEscape(sni)
 	}
 	if BoolField(reality, "enabled") {
 		query = fmt.Sprintf("type=%s&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s",
-			network, sni, DerivePublicKey(StringField(reality, "private_key")), firstShortID(reality))
+			url.QueryEscape(network), url.QueryEscape(sni),
+			url.QueryEscape(DerivePublicKey(StringField(reality, "private_key"))),
+			url.QueryEscape(firstShortID(reality)))
 	}
 	if flow := StringField(user, "flow"); flow != "" {
-		query += "&flow=" + flow
+		query += "&flow=" + url.QueryEscape(flow)
 	}
-	if transport := Transport(inbound); transport != nil {
-		if path := StringField(transport, "path"); path != "" {
-			query += "&path=" + path
-		}
+	if path := StringField(transport, "path"); path != "" {
+		query += "&path=" + url.QueryEscape(path)
+	}
+	if service := StringField(transport, "service_name"); service != "" {
+		query += "&serviceName=" + url.QueryEscape(service) + "&mode=gun"
 	}
 	return query
+}
+
+// escapeFragment escapes a value for the fragment part of a link. QueryEscape
+// encodes spaces as '+', which a fragment would decode literally, so those are
+// rewritten as %20.
+func escapeFragment(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 }
 
 func BuildLink(inbound map[string]any, user map[string]any) string {
@@ -252,12 +265,12 @@ func BuildLink(inbound map[string]any, user map[string]any) string {
 		port = 443
 	}
 
-	tag := Tag(inbound)
-	sni := StringField(tls, "server_name")
+	tag := escapeFragment(Tag(inbound))
+	sni := url.QueryEscape(StringField(tls, "server_name"))
 
 	switch Type(inbound) {
 	case "vless":
-		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", StringField(user, "uuid"), host, port, buildQuery(inbound, user), tag)
+		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", url.QueryEscape(StringField(user, "uuid")), host, port, buildQuery(inbound, user), tag)
 	case "vmess":
 		network := "tcp"
 		if transport := Transport(inbound); transport != nil {
@@ -265,20 +278,38 @@ func BuildLink(inbound map[string]any, user map[string]any) string {
 				network = value
 			}
 		}
+		// Reuse buildQuery so REALITY (sni/fp/pbk/sid) and ws path survive.
+		values, err := url.ParseQuery(buildQuery(inbound, user))
+		if err != nil {
+			return ""
+		}
+		security := "none"
+		if BoolField(reality, "enabled") {
+			security = "reality"
+		} else if BoolField(tls, "enabled") {
+			security = "tls"
+		}
 		payload := map[string]string{
-			"v": "2", "ps": tag + "-" + StringField(user, "name"), "add": host,
+			"v": "2", "ps": Tag(inbound) + "-" + StringField(user, "name"), "add": host,
 			"port": strconv.Itoa(port), "id": StringField(user, "uuid"), "aid": "0",
-			"scy": "auto", "net": network, "type": "none", "host": sni, "tls": "tls",
+			"scy": "auto", "net": network, "type": "none", "host": StringField(tls, "server_name"),
+			"path": values.Get("path"), "tls": security, "sni": StringField(tls, "server_name"),
+			"fp": values.Get("fp"), "pbk": values.Get("pbk"), "sid": values.Get("sid"),
+		}
+		if flow := values.Get("flow"); flow != "" {
+			payload["flow"] = flow
 		}
 		data, _ := json.Marshal(payload)
 		return "vmess://" + base64.StdEncoding.EncodeToString(data)
 	case "trojan":
-		return fmt.Sprintf("trojan://%s@%s:%d?security=tls&sni=%s#%s", StringField(user, "password"), host, port, sni, tag)
+		query := buildQuery(inbound, user)
+		return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", url.QueryEscape(StringField(user, "password")), host, port, query, tag)
 	case "tuic":
-		return fmt.Sprintf("tuic://%s:%s@%s:%d?congestion_control=bbr&alpn=h3&sni=%s#%s",
-			StringField(user, "uuid"), StringField(user, "password"), host, port, sni, tag)
+		credentials := url.QueryEscape(StringField(user, "uuid")) + ":" + url.QueryEscape(StringField(user, "password"))
+		return fmt.Sprintf("tuic://%s@%s:%d?congestion_control=bbr&alpn=h3&sni=%s#%s",
+			credentials, host, port, sni, tag)
 	case "hysteria2":
-		return fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s#%s", StringField(user, "password"), host, port, sni, tag)
+		return fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s#%s", url.QueryEscape(StringField(user, "password")), host, port, sni, tag)
 	default:
 		return ""
 	}
