@@ -16,10 +16,10 @@
 ## Bileşenler
 
 - **sshproxy (Go):** `ws.py` muadili. İlk pakette `X-Real-Host`, `X-Split`, `X-Pass` başlıklarını okur; `101` yanıtı verir. `Sec-WebSocket-Key` varsa gerçek WebSocket çerçevesi (Cloudflare uyumlu), yoksa ham TCP aktarır. İki kopya: `ws.service` (10015) ve `ws-ovpn.service` (10012).
-- **haproxy:**
-  - `http_frontend` (80/8080/...): `Upgrade: websocket` içeren istekler `ws_backend` (10015); varsayılan `dropbear_backend` (143).
+- **haproxy:** Yapılandırma `deploy/haproxy.cfg` kaynağından `/etc/haproxy/haproxy.cfg` olarak kurulur.
+  - `http_frontend` (80/8080): **saf TCP**. `tcp-request content accept if HTTP` ile ilk baytlar yoklanır; `GET`/`CONNECT` ile başlayan istekler `ws_backend` (10015), diğerleri (ham `SSH-2.0-...`) `dropbear_backend` (143). Başlıklar ayrıştırılmadığı için `X-Real-Host`/`X-Split` olduğu gibi kalır.
   - `reality_frontend` (443): TLS ClientHello SNI'sına göre REALITY düğümlerine TCP passthrough. Bilinmeyen SNI → whatsapp düğümü (maskeleme korunur).
-- **sing-box:** `/usr/local/etc/sing-box/config.json`; düğümler yalnızca `127.0.0.1` üzerinde dinler. Her REALITY düğümünün `handshake.server` alanı kendi SNI'sidir.
+- **sing-box:** `/usr/local/etc/sing-box/config.json`; düğümler yalnızca `127.0.0.1` üzerinde dinler. Her REALITY düğümünün `handshake.server` alanı kendi SNI'sidir. `sing-box` ikilisi `/usr/local/bin/sing-box` beklenir (yoksa `/usr/bin/sing-box` sembolik bağlanır).
 - **Linux hesapları:** `sshvpn` grubunda, kabuk `/bin/false`, süre `chage` ile. `baba` menüsü rastgele kullanıcı adı/şifre üretir.
 
 ## Servisler

@@ -20,7 +20,7 @@ Go ile yazılmış SSH WebSocket/Payload köprüsü, sing-box (VLESS/REALITY) y�
 sudo bash install.sh
 ```
 
-Gereksinim: Ubuntu 22.04/24.04, root. Script bağımlılıkları kurar, sing-box + Go kurar, servisleri (ws, ws-ovpn, haproxy, fail2ban) yapılandırır.
+Gereksinim: Ubuntu 22.04/24.04, root. Script bağımlılıkları kurar, sing-box + Go kurar, haproxy yapılandırmasını (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`) ve servisleri (ws, ws-ovpn, haproxy, sing-box, fail2ban) yerleştirir.
 
 ## Kullanım
 
@@ -39,7 +39,7 @@ vpnctl restore <file> # yedekten geri yükle (--yes ile onaysız)
 
 | Port | Ne |
 |---|---|
-| 80 | haproxy → `Upgrade: websocket` istekleri 10015'e, diğer SSH trafiği dropbear'a |
+| 80 | haproxy → `GET`/`CONNECT` istekleri 10015'e (WS), diğer SSH trafiği dropbear'a (143) |
 | 443 | haproxy SNI passthrough → REALITY düğümleri (localhost 1443-1447) |
 | 10015 | `sshproxy` (SSH köprüsü, localhost) |
 | 10012 | `sshproxy` (OpenVPN-over-WS, localhost) |

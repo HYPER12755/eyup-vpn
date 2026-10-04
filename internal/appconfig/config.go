@@ -58,7 +58,10 @@ func MenuConfValues() (string, string) {
 
 func PublicHost() string {
 	menuHost, _ := MenuConfValues()
-	return Env("SSH_PUBLIC_HOST", Env("FAKE_HOST", menuHost))
+	if host := Env("SSH_PUBLIC_HOST", Env("FAKE_HOST", menuHost)); host != "" {
+		return host
+	}
+	return DefaultPublicHost
 }
 
 var (

@@ -31,17 +31,49 @@ ufw allow 22/tcp >/dev/null 2>&1 || true
 ufw allow 80/tcp >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
 
+SINGBOX_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
+SINGBOX_BIN="/usr/local/bin/sing-box"
+
 log "Sing-box kuruluyor..."
 if ! command -v sing-box >/dev/null 2>&1; then
   curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1 || die "Sing-box kurulumu başarısız."
 fi
-mkdir -p /etc/sing-box
-if [[ ! -s /etc/sing-box/config.json ]]; then
-  printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}' > /etc/sing-box/config.json
+mkdir -p "${SINGBOX_DIR}"
+# Yığın sing-box dosyalarını /usr/local altında bekler (singbox yöneticisi ve Go araçları).
+if [[ ! -x "${SINGBOX_BIN}" ]]; then
+  SINGBOX_REAL="$(command -v sing-box)"
+  if [[ "${SINGBOX_REAL}" != "${SINGBOX_BIN}" ]]; then
+    ln -sf "${SINGBOX_REAL}" "${SINGBOX_BIN}"
+  fi
 fi
+if [[ ! -s "${SINGBOX_CONFIG}" ]]; then
+  printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}' > "${SINGBOX_CONFIG}"
+fi
+if [[ ! -f /etc/systemd/system/sing-box.service ]] || ! grep -q "${SINGBOX_CONFIG}" /etc/systemd/system/sing-box.service; then
+  cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=${SINGBOX_BIN} run -c ${SINGBOX_CONFIG}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+systemctl daemon-reload
 systemctl enable sing-box >/dev/null 2>&1 || true
 systemctl restart sing-box >/dev/null 2>&1 || warn "Sing-box servisi başlatılamadı."
-ok "Sing-box hazır: $(sing-box version | head -n1)"
+ok "Sing-box hazır: $("${SINGBOX_BIN}" version 2>/dev/null | head -n1)"
 
 log "Sing-box Manager kuruluyor..."
 if [[ -f "${SCRIPT_DIR}/scripts/singbox-manager.sh" ]]; then
@@ -100,6 +132,21 @@ log "Servisler yapılandırılıyor..."
 install -m 0644 "${STACK_DIR}/deploy/ws.service" /etc/systemd/system/ws.service
 install -m 0644 "${STACK_DIR}/deploy/ws-ovpn.service" /etc/systemd/system/ws-ovpn.service
 
+HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.cfg"
+HAPROXY_DST="/etc/haproxy/haproxy.cfg"
+if [[ ! -f "${HAPROXY_DST}" ]] || grep -q "# example config for haproxy" "${HAPROXY_DST}"; then
+  if [[ -f "${HAPROXY_DST}" ]]; then
+    cp -a "${HAPROXY_DST}" "${HAPROXY_DST}.vpnstack-backup"
+    log "Stok haproxy.cfg yedeklendi: ${HAPROXY_DST}.vpnstack-backup"
+  fi
+  install -m 0644 "${HAPROXY_SRC}" "${HAPROXY_DST}"
+  ok "haproxy.cfg kuruldu (80: WS/SSH · 443: REALITY SNI)."
+elif ! grep -q "# vpnstack" "${HAPROXY_DST}"; then
+  warn "${HAPROXY_DST} elle düzenlenmiş görünüyor; dokunulmadı. Eksik REALITY/SNI ve WS yönlendirmesini elle ekleyin."
+else
+  ok "Mevcut haproxy.cfg korundu (düzenlemeleriniz silinmedi)."
+fi
+
 mkdir -p /etc/sshvpn
 if [[ ! -f /etc/sshvpn/menu.conf ]]; then
   printf 'FAKE_HOST=\nEXTRA_HEADER=\n' > /etc/sshvpn/menu.conf
@@ -109,8 +156,20 @@ fi
 systemctl daemon-reload
 systemctl enable --now ws.service >/dev/null 2>&1 || warn "ws.service başlatılamadı."
 systemctl enable --now ws-ovpn.service >/dev/null 2>&1 || warn "ws-ovpn.service başlatılamadı."
-systemctl enable --now haproxy >/dev/null 2>&1 || warn "haproxy başlatılamadı."
-ok "ws.service, ws-ovpn.service ve haproxy aktif."
+if haproxy -c -f "${HAPROXY_DST}" >/dev/null 2>&1; then
+  systemctl enable haproxy >/dev/null 2>&1 || true
+  systemctl reload-or-restart haproxy >/dev/null 2>&1 || systemctl enable --now haproxy >/dev/null 2>&1 || warn "haproxy başlatılamadı."
+else
+  warn "haproxy yapılandırması geçersiz; haproxy yeniden yüklenmedi."
+  haproxy -c -f "${HAPROXY_DST}" 2>&1 | tail -5 || true
+fi
+ok "ws.service, ws-ovpn.service yapılandırıldı."
+
+for p in 109 143; do
+  if ! (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then
+    warn "127.0.0.1:${p} dinlemiyor — doğrudan SSH için dropbear'ı bu portta yapılandırın."
+  fi
+done
 
 log "fail2ban yapılandırılıyor..."
 JAILS=""
@@ -150,6 +209,6 @@ echo -e " Sağlık Kontrolü : ${GREEN}vpnctl doctor${NC}"
 echo -e " Sunucu IP       : ${GREEN}${SERVER_IP}${NC}"
 echo -e " SSH Portları    : ${GREEN}80${NC} (haproxy) / ${GREEN}10015${NC} (sshproxy)"
 echo -e " SSH Hedefi      : ${GREEN}127.0.0.1:109${NC}"
-echo -e " Sing-box Config : ${GREEN}/etc/sing-box/config.json${NC}"
+echo -e " Sing-box Config : ${GREEN}${SINGBOX_CONFIG}${NC}"
 echo -e " Servisler       : ${GREEN}systemctl status ws ws-ovpn haproxy sing-box${NC}"
 echo -e "${GREEN}===============================================${NC}"

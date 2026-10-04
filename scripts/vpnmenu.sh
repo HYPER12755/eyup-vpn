@@ -12,7 +12,11 @@ GROUP="sshvpn"
 SSH_PORT_PUBLIC="80"
 SSH_PORT_DIRECT="10015"
 SSH_TARGET="127.0.0.1:109"
-SINGBOX_CONFIG="/etc/sing-box/config.json"
+SINGBOX_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
+SINGBOX_CERT_DIR="${SINGBOX_DIR}"
+REALITY_PORT_MIN=1443
+REALITY_PORT_MAX=1499
 MENU_CONF="/etc/sshvpn/menu.conf"
 DEFAULT_HOST="can.vps-mosto.site"
 FAKE_HOST=""
@@ -68,12 +72,21 @@ random_password() {
 }
 
 random_free_port() {
-  local port i
-  for i in $(seq 1 50); do
+  local port
+  for _ in $(seq 1 50); do
     port=$(( (RANDOM % 50001) + 10000 ))
     ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN || { echo "${port}"; return; }
   done
   echo "$(( (RANDOM % 50001) + 10000 ))"
+}
+
+random_free_port_range() {
+  local lo="$1" hi="$2" port
+  for _ in $(seq 1 50); do
+    port=$(( lo + RANDOM % (hi - lo + 1) ))
+    ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN || { echo "${port}"; return; }
+  done
+  echo "${lo}"
 }
 
 account_expiry() {
@@ -250,34 +263,8 @@ run_singbox_manager() {
   bash /usr/local/bin/singbox
 }
 
-menu() {
-  echo
-  systemctl is-active ws.service >/dev/null 2>&1 && echo -e " ws.service      : ${GREEN}aktif${NC}" || echo -e " ws.service      : ${RED}kapalı${NC}"
-  systemctl is-active haproxy.service >/dev/null 2>&1 && echo -e " haproxy.service : ${GREEN}aktif${NC}" || echo -e " haproxy.service : ${RED}kapalı${NC}"
-  systemctl is-active sing-box.service >/dev/null 2>&1 && echo -e " sing-box.service: ${GREEN}aktif${NC}" || echo -e " sing-box.service: ${RED}kapalı${NC}"
-  echo
-  local answer
-  read -r -p "$(echo -e "${CYAN}Servisleri yeniden başlat? (e/H):${NC} ")" answer
-  if [[ "${answer}" =~ ^[eEyY]$ ]]; then
-    systemctl restart ws.service 2>/dev/null
-    systemctl restart haproxy.service 2>/dev/null
-    systemctl restart sing-box.service 2>/dev/null
-    echo -e "${GREEN}Servisler yeniden başlatıldı.${NC}"
-  fi
-}
-
-system_info() {
-  echo
-  echo -e " Sunucu IP : ${GREEN}$(server_ip)${NC}"
-  echo -e " SSH Port  : ${GREEN}${SSH_PORT_PUBLIC}${NC} (haproxy) / ${GREEN}${SSH_PORT_DIRECT}${NC} (ws)"
-  echo -e " Hedef     : ${GREEN}${SSH_TARGET}${NC}"
-  echo -e " SSH Host  : ${GREEN}${FAKE_HOST:-${DEFAULT_HOST}}${NC}"
-  echo -e " Sing-box  : ${GREEN}${SINGBOX_CONFIG}${NC}"
-  echo
-}
-
 singbox_ensure_config() {
-  mkdir -p /etc/sing-box
+  mkdir -p "${SINGBOX_DIR}"
   [[ -s "${SINGBOX_CONFIG}" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}' > "${SINGBOX_CONFIG}"
 }
 
@@ -331,10 +318,6 @@ singbox_create_inbound() {
     *) echo -e "${RED}Geçersiz seçim.${NC}"; return ;;
   esac
 
-  local port
-  read -r -p "$(echo -e "${CYAN}Port (boş = rastgele 10000-60000):${NC} ")" port
-  [[ -n "${port}" ]] || port="$(random_free_port)"
-
   local security="tls" domain="" sni="" cert="" key="" certpair=""
   if [[ "${protocol}" == "vless" ]]; then
     local sec_choice
@@ -342,6 +325,24 @@ singbox_create_inbound() {
     read -r -p "$(echo -e "${CYAN}Seçim (varsayılan 1):${NC} ")" sec_choice
     sec_choice="${sec_choice:-1}"
     [[ "${sec_choice}" == "2" ]] && security="reality"
+  fi
+
+  local port listen_addr link_port
+  if [[ "${security}" == "reality" ]]; then
+    read -r -p "$(echo -e "${CYAN}Port (boş = ${REALITY_PORT_MIN}-${REALITY_PORT_MAX} arası boş, haproxy 443 SNI ile yayınlar):${NC} ")" port
+    if [[ -z "${port}" ]]; then
+      port="$(random_free_port_range "${REALITY_PORT_MIN}" "${REALITY_PORT_MAX}")"
+    elif [[ ! "${port}" =~ ^[0-9]+$ ]] || (( port < REALITY_PORT_MIN || port > REALITY_PORT_MAX )); then
+      echo -e "${RED}REALITY portu ${REALITY_PORT_MIN}-${REALITY_PORT_MAX} aralığında olmalı.${NC}"
+      return 1
+    fi
+    listen_addr="127.0.0.1"
+    link_port=443
+  else
+    read -r -p "$(echo -e "${CYAN}Port (boş = rastgele 10000-60000):${NC} ")" port
+    [[ -n "${port}" ]] || port="$(random_free_port)"
+    listen_addr="::"
+    link_port="${port}"
   fi
 
   if [[ "${security}" == "reality" ]]; then
@@ -369,24 +370,24 @@ singbox_create_inbound() {
         priv="$(echo "${keypair}" | awk -F': ' '/PrivateKey/{print $2}')"
         pub="$(echo "${keypair}" | awk -F': ' '/PublicKey/{print $2}')"
         sid="$(sing-box generate rand --hex 8)"
-        inbound="$(jq -n --arg tag "${tag}" --argjson port "${port}" --arg uuid "${uuid}" --arg sni "${sni}" --arg priv "${priv}" --arg sid "${sid}" \
-          '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{name:"user1",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$priv,short_id:[$sid]}}}')"
-        link="vless://${uuid}@${ip}:${port}?type=tcp&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision#${tag}"
+        inbound="$(jq -n --arg tag "${tag}" --arg listen "${listen_addr}" --argjson port "${port}" --arg uuid "${uuid}" --arg sni "${sni}" --arg priv "${priv}" --arg sid "${sid}" \
+          '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"user1",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$priv,short_id:[$sid]}}}')"
+        link="vless://${uuid}@${ip}:${link_port}?type=tcp&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision#${tag}"
       else
-        inbound="$(jq -n --arg tag "${tag}" --argjson port "${port}" --arg uuid "${uuid}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
-          '{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{name:"user1",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key}}')"
-        link="vless://${uuid}@${ip}:${port}?type=tcp&security=tls&sni=${domain}&flow=xtls-rprx-vision#${tag}"
+        inbound="$(jq -n --arg tag "${tag}" --arg listen "${listen_addr}" --argjson port "${port}" --arg uuid "${uuid}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
+          '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"user1",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key}}')"
+        link="vless://${uuid}@${ip}:${link_port}?type=tcp&security=tls&sni=${domain}&flow=xtls-rprx-vision#${tag}"
       fi
       ;;
     hysteria2)
-      inbound="$(jq -n --arg tag "${tag}" --argjson port "${port}" --arg pass "${password}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
-        '{type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,users:[{name:"user1",password:$pass}],tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key,alpn:["h3"]}}')"
-      link="hysteria2://${password}@${ip}:${port}/?sni=${domain}#${tag}"
+      inbound="$(jq -n --arg tag "${tag}" --arg listen "${listen_addr}" --argjson port "${port}" --arg pass "${password}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
+        '{type:"hysteria2",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"user1",password:$pass}],tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key,alpn:["h3"]}}')"
+      link="hysteria2://${password}@${ip}:${link_port}/?sni=${domain}#${tag}"
       ;;
     tuic)
-      inbound="$(jq -n --arg tag "${tag}" --argjson port "${port}" --arg uuid "${uuid}" --arg pass "${password}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
-        '{type:"tuic",tag:$tag,listen:"::",listen_port:$port,users:[{name:"user1",uuid:$uuid,password:$pass}],congestion_control:"bbr",tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key,alpn:["h3"]}}')"
-      link="tuic://${uuid}:${password}@${ip}:${port}/?sni=${domain}&congestion_control=bbr#${tag}"
+      inbound="$(jq -n --arg tag "${tag}" --arg listen "${listen_addr}" --argjson port "${port}" --arg uuid "${uuid}" --arg pass "${password}" --arg domain "${domain}" --arg cert "${cert}" --arg key "${key}" \
+        '{type:"tuic",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"user1",uuid:$uuid,password:$pass}],congestion_control:"bbr",tls:{enabled:true,server_name:$domain,certificate_path:$cert,key_path:$key,alpn:["h3"]}}')"
+      link="tuic://${uuid}:${password}@${ip}:${link_port}/?sni=${domain}&congestion_control=bbr#${tag}"
       ;;
   esac
 
@@ -398,7 +399,11 @@ singbox_create_inbound() {
   echo -e "${GREEN}==============================================${NC}"
   echo -e " Tag       : ${GREEN}${tag}${NC}"
   echo -e " Protokol  : ${GREEN}${protocol}${NC}"
-  echo -e " Port      : ${GREEN}${port}${NC}"
+  if [[ "${security}" == "reality" ]]; then
+    echo -e " Port      : ${GREEN}${port}${NC} (yalnızca ${listen_addr} · haproxy 443 SNI ile yayınlanır)"
+  else
+    echo -e " Port      : ${GREEN}${port}${NC}"
+  fi
   if [[ "${security}" == "reality" ]]; then
     echo -e " Güvenlik  : ${GREEN}REALITY${NC} (SNI: ${sni})"
   else
