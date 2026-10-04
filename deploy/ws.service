@@ -1,0 +1,33 @@
+[Unit]
+Description=SSH WebSocket Proxy (Go)
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+User=root
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+ReadWritePaths=/run
+ExecStart=/usr/local/bin/sshproxy 10015
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
