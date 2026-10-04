@@ -194,10 +194,7 @@ func handleConn(client net.Conn, listenPort int) {
 // compares parsed addresses rather than prefixes, so names such as
 // "localhost.attacker.example" are not accepted.
 func isLocalHost(hostPort string) bool {
-	host := hostPort
-	if index := strings.Index(hostPort, ":"); index != -1 {
-		host = hostPort[:index]
-	}
+	host, _, _ := splitHostPort(hostPort)
 	if host == "localhost" {
 		return true
 	}
@@ -207,35 +204,68 @@ func isLocalHost(hostPort string) bool {
 	return false
 }
 
-func targetAddress(hostPort string) (string, error) {
+// splitHostPort separates host and port, accepting the bracketed IPv6 form
+// ("[::1]:109"). net.SplitHostPort is deliberately not used: it rejects a
+// missing port, but X-Real-Host may legitimately omit it. hasPort reports
+// whether a separator was present at all, so "host:" stays an error rather
+// than being silently completed to the default port.
+func splitHostPort(hostPort string) (host, port string, hasPort bool) {
+	if strings.HasPrefix(hostPort, "[") {
+		if end := strings.Index(hostPort, "]"); end != -1 {
+			host = hostPort[1:end]
+			rest := hostPort[end+1:]
+			if strings.HasPrefix(rest, ":") {
+				return host, rest[1:], true
+			}
+			return host, "", false
+		}
+	}
 	index := strings.Index(hostPort, ":")
 	if index == -1 {
-		return net.JoinHostPort(hostPort, strconv.Itoa(443)), nil
+		return hostPort, "", false
 	}
-	host := hostPort[:index]
-	port, err := strconv.Atoi(hostPort[index+1:])
-	if err != nil || port < 1 || port > 65535 {
-		return "", fmt.Errorf("sshproxy: geçersiz hedef %q", hostPort)
-	}
-	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	return hostPort[:index], hostPort[index+1:], true
 }
 
+func targetAddress(hostPort string) (string, error) {
+	host, port, hasPort := splitHostPort(hostPort)
+	if host == "" {
+		return "", fmt.Errorf("sshproxy: geçersiz hedef %q", hostPort)
+	}
+	if !hasPort {
+		return net.JoinHostPort(host, strconv.Itoa(443)), nil
+	}
+	parsed, err := strconv.Atoi(port)
+	if err != nil || parsed < 1 || parsed > 65535 {
+		return "", fmt.Errorf("sshproxy: geçersiz hedef %q", hostPort)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(parsed)), nil
+}
+
+// findHeader returns the value of a request header. Header names are matched
+// case-insensitively (HTTP/2 requires lowercase, and clients differ) and only
+// against a line's own name field, so a value that merely mentions the header
+// (Referer: http://host/X-Real-Host: evil) is not mistaken for the real thing.
 func findHeader(head, header string) string {
-	aux := strings.Index(head, header+": ")
-	if aux == -1 {
-		return ""
+	want := strings.ToLower(header)
+	for head != "" {
+		var line string
+		if index := strings.Index(head, "\n"); index != -1 {
+			line, head = head[:index+1], head[index+1:]
+		} else {
+			line, head = head, ""
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			return ""
+		}
+		name, value, found := strings.Cut(line, ":")
+		if !found || strings.ToLower(strings.TrimSpace(name)) != want {
+			continue
+		}
+		return strings.TrimSpace(value)
 	}
-	offset := strings.Index(head[aux:], ":")
-	if offset == -1 {
-		return ""
-	}
-	aux += offset
-	head = head[aux+2:]
-	aux = strings.Index(head, "\r\n")
-	if aux == -1 {
-		return ""
-	}
-	return head[:aux]
+	return ""
 }
 
 func proxy(client net.Conn, clientReader io.Reader, target net.Conn) {

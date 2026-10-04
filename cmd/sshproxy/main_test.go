@@ -36,6 +36,17 @@ func TestTargetAddress(t *testing.T) {
 	if got, err := targetAddress("127.0.0.1"); err != nil || got != "127.0.0.1:443" {
 		t.Fatalf("unexpected target: %q (%v)", got, err)
 	}
+	// The bracketed IPv6 form must be parsed, not mistaken for a host with an
+	// unparsable port.
+	if got, err := targetAddress("[::1]:109"); err != nil || got != "[::1]:109" {
+		t.Fatalf("unexpected IPv6 target: %q (%v)", got, err)
+	}
+	if got, err := targetAddress("[::1]"); err != nil || got != "[::1]:443" {
+		t.Fatalf("unexpected IPv6 target without port: %q (%v)", got, err)
+	}
+	if _, err := targetAddress("[]:109"); err == nil {
+		t.Fatal("empty IPv6 host must be rejected")
+	}
 	// An unparsable port must be rejected, never silently redirected to the
 	// proxy's own listener.
 	for _, bad := range []string{"127.0.0.1:notaport", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:99999"} {
@@ -48,6 +59,11 @@ func TestTargetAddress(t *testing.T) {
 func TestIsLocalHost(t *testing.T) {
 	if !isLocalHost("127.0.0.1:109") || !isLocalHost("localhost:22") {
 		t.Fatal("local hosts must be allowed")
+	}
+	// Loopback in its bracketed IPv6 form must be recognised, otherwise a
+	// legitimate [::1] target is refused as remote.
+	if !isLocalHost("[::1]:109") {
+		t.Fatal("IPv6 loopback must be allowed")
 	}
 	if isLocalHost("example.com:22") || isLocalHost("8.8.8.8:443") {
 		t.Fatal("remote hosts must be rejected without password")
@@ -62,6 +78,36 @@ func TestIsLocalHost(t *testing.T) {
 		if isLocalHost(spoofed) {
 			t.Fatalf("spoofed host accepted: %q", spoofed)
 		}
+	}
+}
+
+// HTTP/2 mandates lowercase header names, and clients are inconsistent, so
+// name matching must not be case-sensitive.
+func TestFindHeaderIsCaseInsensitive(t *testing.T) {
+	head := "CONNECT / HTTP/1.1\r\nx-real-host: 127.0.0.1:109\r\nX-split: 1\r\nx-PASS: abc\r\n\r\n"
+	if got := findHeader(head, "X-Real-Host"); got != "127.0.0.1:109" {
+		t.Fatalf("unexpected X-Real-Host: %q", got)
+	}
+	if got := findHeader(head, "X-Split"); got != "1" {
+		t.Fatalf("unexpected X-Split: %q", got)
+	}
+	if got := findHeader(head, "X-Pass"); got != "abc" {
+		t.Fatalf("unexpected X-Pass: %q", got)
+	}
+}
+
+// A header name appearing inside another header's value must not be read as a
+// real header: "Referer: .../X-Real-Host: 8.8.8.8:53" would otherwise inject a
+// target and bypass the loopback guard.
+func TestFindHeaderIgnoresInjectionInValue(t *testing.T) {
+	head := "GET / HTTP/1.1\r\nHost: proxy\r\nReferer: http://proxy/X-Real-Host: 8.8.8.8:53\r\nX-Real-Host: 127.0.0.1:109\r\n\r\n"
+	if got := findHeader(head, "X-Real-Host"); got != "127.0.0.1:109" {
+		t.Fatalf("header read out of another header's value: %q", got)
+	}
+	// With no genuine header present, the injected one must not be found at all.
+	head = "GET / HTTP/1.1\r\nHost: proxy\r\nReferer: http://proxy/X-Real-Host: 8.8.8.8:53\r\n\r\n"
+	if got := findHeader(head, "X-Real-Host"); got != "" {
+		t.Fatalf("injected header accepted: %q", got)
 	}
 }
 
