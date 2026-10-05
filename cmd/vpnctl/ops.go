@@ -51,6 +51,33 @@ func portOpen(port int) bool {
 	return true
 }
 
+// portListener reports the process name listening on a local TCP port, or an
+// empty string when the port is closed or the name cannot be determined.
+// A port being open says nothing about which program holds it, and on servers
+// that also run the legacy Python bridge that difference matters.
+func portListener(port int) string {
+	out, err := exec.Command("ss", "-ltnpH", fmt.Sprintf("sport = :%d", port)).Output()
+	if err != nil {
+		return ""
+	}
+	const marker = "users:(("
+	text := string(out)
+	index := strings.Index(text, marker)
+	if index == -1 {
+		return ""
+	}
+	rest := text[index+len(marker):]
+	open := strings.Index(rest, "\"")
+	if open == -1 {
+		return ""
+	}
+	rest = rest[open+1:]
+	if end := strings.Index(rest, "\""); end != -1 {
+		return rest[:end]
+	}
+	return ""
+}
+
 func printChecks(checks []check) int {
 	failed := 0
 	for _, item := range checks {
@@ -126,12 +153,27 @@ func cmdDoctor() int {
 			return true, "sshd/dropbear jails"
 		}),
 		runCheck("ssh servisleri", func() (bool, string) {
-			dropbear := serviceActive("dropbear")
+			dropbear := serviceActive("dropbear") || serviceActive("dropbear-vpnstack")
 			sshd := serviceActive("ssh") || serviceActive("sshd")
 			if !dropbear && !sshd {
 				return false, "ne dropbear ne sshd"
 			}
 			return true, fmt.Sprintf("dropbear=%v sshd=%v", dropbear, sshd)
+		}),
+		// The SSH tunnel path needs dropbear on both ports: 109 is sshproxy's
+		// default target, 143 is where haproxy sends raw SSH. The unit check
+		// above says nothing about the ports actually being held.
+		runCheck("dropbear :109", func() (bool, string) {
+			if portOpen(109) {
+				return true, "sshproxy hedefi"
+			}
+			return false, "kapalı"
+		}),
+		runCheck("dropbear :143", func() (bool, string) {
+			if portOpen(143) {
+				return true, "haproxy ham SSH arka ucu"
+			}
+			return false, "kapalı"
 		}),
 		runCheck("port 80", func() (bool, string) {
 			if portOpen(80) {
@@ -146,10 +188,13 @@ func cmdDoctor() int {
 			return false, "kapalı"
 		}),
 		runCheck("port 10015", func() (bool, string) {
-			if portOpen(10015) {
-				return true, "sshproxy"
+			if !portOpen(10015) {
+				return false, "kapalı"
 			}
-			return false, "kapalı"
+			if name := portListener(10015); name != "" && !strings.Contains(name, "sshproxy") {
+				return false, fmt.Sprintf("%s dinliyor (sshproxy değil)", name)
+			}
+			return true, "sshproxy"
 		}),
 		runCheck("menu.conf", func() (bool, string) {
 			if _, err := os.Stat(appconfig.MenuConfPath); err == nil {

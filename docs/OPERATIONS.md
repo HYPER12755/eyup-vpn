@@ -27,9 +27,24 @@ Backup contents: `sing-box/config.json`, `sing-box/phone_client.json`, `sshvpn/m
 
 To route a new SNI to 443, add this line to the `reality_frontend` section of `/etc/haproxy/haproxy.cfg`: `use_backend re_<name>_backend if { req.ssl_sni -i <sni> }`, define the matching backend with `127.0.0.1:<port>`, then run `haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy`.
 
+## Xray (legacy profile)
+
+- `/etc/xray/config.json` is marker-based: `#& <user> <expiry>` lines mark user entries, and `#vless` / `#vmess` / `#trojanws` / `#vlessgrpc` / ... are the insertion markers the manager writes to.
+- The vendored panel is `va` (or `baba` → `[6] Xray Yönetimi`). It is upstream's script (see `scripts/v2ray-agent/UPSTREAM.md`) and manages its own Xray/nginx/TLS layout; running it can change haproxy, sing-box and sshproxy behaviour, so take a backup first (`vpnctl backup`).
+- Domain and certificate live in `/etc/xray/domain` and `/etc/xray/xray.crt` + `xray.key`. `install.sh` searches for an existing pair first (`/etc/xray`, `hap.pem`, Let's Encrypt, `~/.acme.sh`, v2ray-agent TLS), reads the domain from `/etc/xray/domain` or the certificate CN, and only then prompts or generates a self-signed pair. `VPNSTACK_DOMAIN`, `VPNSTACK_CERT_PATH`, `VPNSTACK_KEY_PATH` override the search. In the legacy profile the same pair is rebuilt into `/etc/haproxy/hap.pem`.
+- Before replacing anything from an older layout, the installer backs up the legacy SSH bridge to `/etc/sshvpn/legacy/ws.py` and old `ws`/`ws-ovpn` units to `*.vpnstack-backup`, so the previous working system stays recoverable.
+
 ## haproxy configuration
 
-`/etc/haproxy/haproxy.cfg` comes from the `deploy/haproxy.cfg` version in the repo. `install.sh` only replaces the existing file if it is **absent** or is the distribution's stock template, so REALITY/SNI lines you added by hand are preserved (if the stock template is replaced, a `.vpnstack-backup` copy is taken first).
+`/etc/haproxy/haproxy.cfg` comes from the `deploy/haproxy.cfg` version in the repo. `install.sh` only replaces the existing file if it is **absent** or is the distribution's stock template, so REALITY/SNI lines you added by hand are preserved (if the stock template is replaced, a `.vpnstack-backup` copy is taken first). When an existing custom configuration is kept, `install.sh` still verifies that it routes WebSocket to `127.0.0.1:10015` and raw SSH to `127.0.0.1:143`, and names whatever is missing instead of leaving a silent gap.
+
+Servers that already run a multi-protocol layout (TLS terminated by haproxy on 443, extra ports, xray/OpenVPN backends) can install that layout instead of the REALITY passthrough:
+
+```bash
+sudo VPNSTACK_HAPROXY_PROFILE=legacy bash install.sh
+```
+
+The legacy profile comes from `deploy/haproxy.legacy.cfg`; an existing config is backed up to `.vpnstack-backup` first. It needs `/etc/haproxy/hap.pem` for 443 and cannot coexist with the REALITY frontend, since both bind 443.
 
 To derive a new config after updating the source file:
 
@@ -40,7 +55,12 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy
 
 ## Direct SSH ports
 
-If `127.0.0.1:109` (the sshproxy target) and `127.0.0.1:143` (haproxy's `dropbear_backend`) are not listening, `install.sh` warns you. The WebSocket path (10015/80) does not need them; configure dropbear on these ports only if you intend to use raw SSH.
+`install.sh` guarantees dropbear on `127.0.0.1:109` (the sshproxy target) and `127.0.0.1:143` (haproxy's raw SSH backend) in one of two ways:
+
+- If a dropbear already listens on both ports, it is adopted as-is: the installer does not replace, disable or restart it. A dropbear bound to `0.0.0.0` stays bound to `0.0.0.0`; the installer warns, since `127.0.0.1` is the intended scope.
+- Otherwise the `dropbear` package is installed (apt is retried) and run as the `dropbear-vpnstack` unit on those two loopback ports. If it cannot be installed, the install **fails** instead of leaving raw SSH silently dead; `VPNSTACK_SKIP_DROPBEAR=1` overrides that deliberately.
+
+The WebSocket path (10015/80) needs dropbear only when the payload's target is the default `127.0.0.1:109`; raw SSH on port 80 always does.
 
 ## Troubleshooting
 
@@ -48,6 +68,7 @@ If `127.0.0.1:109` (the sshproxy target) and `127.0.0.1:143` (haproxy's `dropbea
 vpnctl doctor
 journalctl -u ws -n 50 --no-pager
 journalctl -u sing-box -n 50 --no-pager
+journalctl -u xray -n 50 --no-pager
 haproxy -c -f /etc/haproxy/haproxy.cfg
 ```
 
@@ -56,5 +77,5 @@ haproxy -c -f /etc/haproxy/haproxy.cfg
 - **SSH connection dropping:** check `journalctl -u ws` and `pgrep -af sshproxy`; re-fetch the client payload (including Sec-WebSocket-Key) from the `baba` menu.
 - **Client connects but no data flows:** a WebSocket client must send its first frame within 2 s of the handshake, otherwise `sshproxy` falls back to raw relay. See [PROTOCOL.md](PROTOCOL.md#framing-selection).
 - **`400 BadTarget`:** the `X-Real-Host` port was empty or out of range. `403 Forbidden` means the target was not loopback and no password is compiled in.
-- **Raw SSH on port 80 fails but the WebSocket path works:** haproxy sends raw SSH to `127.0.0.1:143` and `sshproxy` defaults to `127.0.0.1:109`. Both must be listening; `install.sh` runs dropbear on both via the `dropbear-vpnstack` unit. Check with `ss -ltn | grep -E '109|143'`.
-- **`systemctl restart dropbear-vpnstack` fails:** run it in the foreground to see the error — `/usr/sbin/dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143`. If it exits immediately, a host key could not be created in `/etc/dropbear/`.
+- **Raw SSH on port 80 fails but the WebSocket path works:** haproxy sends raw SSH to `127.0.0.1:143` and `sshproxy` defaults to `127.0.0.1:109`. Both must be listening — `vpnctl doctor` checks `dropbear :109` and `dropbear :143` explicitly. If they are down, re-run `install.sh` (it adopts an already-running dropbear, otherwise installs one) and verify with `ss -ltn | grep -E '109|143'`.
+- **`systemctl restart dropbear-vpnstack` fails:** run it in the foreground to see the error — `/usr/sbin/dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143`. If it exits immediately, a host key could not be created in `/etc/dropbear/`. When an existing dropbear was adopted, this unit does not exist — check the running one instead (`pgrep -af dropbear`).

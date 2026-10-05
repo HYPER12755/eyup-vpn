@@ -12,12 +12,16 @@ const (
 	SingboxConfigPath = "/usr/local/etc/sing-box/config.json"
 	SingboxClientPath = "/usr/local/etc/sing-box/phone_client.json"
 	SingboxBinary     = "/usr/local/bin/sing-box"
-	MenuConfPath      = "/etc/sshvpn/menu.conf"
 	DefaultPublicHost = "can.vps-mosto.site"
 	DefaultSSHTarget  = "127.0.0.1:109"
 	DefaultSSHGroup   = "sshvpn"
 	DefaultSSHShell   = "/bin/false"
 )
+
+// MenuConfPath is a variable, not a constant: on an installed server the file
+// exists and takes precedence over the default host, so tests must be able to
+// point it at a temp path to stay independent of the host they run on.
+var MenuConfPath = "/etc/sshvpn/menu.conf"
 
 func Env(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {

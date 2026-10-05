@@ -24,14 +24,14 @@ goroutines and shares a `bufio.Reader` between them.
 
 ## Test layout
 
-29 tests, no mocks — `handleConn` is exercised over real loopback sockets
+30 tests, no mocks — `handleConn` is exercised over real loopback sockets
 against a local listener.
 
 | Package | Tests | Covers |
 |---|---|---|
 | `cmd/sshproxy` | 16 | header parsing, target validation, loopback guard, framing detection, pipelined and split requests |
 | `internal/singbox` | 6 | public-key derivation, link building, add/remove user |
-| `internal/appconfig` | 4 | env var fallback, public host resolution |
+| `internal/appconfig` | 5 | env var fallback, public host resolution, menu.conf precedence (path injectable) |
 | `internal/accounts` | 3 | username validation, random credentials, client payloads |
 
 Note: `internal/singbox`'s tests stub `Validate`, so they do not exercise the
@@ -74,6 +74,7 @@ cmd/vpnctl/ops.go        status/doctor/links/users, backup, restore
 internal/singbox/        config load/save, REALITY keys, link building
 internal/accounts/       SSH user creation and client payloads
 internal/appconfig/      paths and env var resolution
+scripts/v2ray-agent/     vendored Xray panel (UPSTREAM.md pins commit + sha256)
 ```
 
 ## Conventions
