@@ -19,8 +19,11 @@ REALITY_PORT_MIN=1443
 REALITY_PORT_MAX=1499
 MENU_CONF="/etc/sshvpn/menu.conf"
 DEFAULT_HOST="can.vps-mosto.site"
+DOMAIN_FILE="/etc/xray/domain"
+XRAY_PANEL_BIN="/usr/local/bin/va"
 FAKE_HOST=""
 EXTRA_HEADER=""
+SERVER_IP_CACHE=""
 
 [[ "${EUID}" -eq 0 ]] || { echo -e "${RED}Bu menü root olarak çalıştırılmalıdır.${NC}"; exit 1; }
 
@@ -47,11 +50,64 @@ client_host() {
 }
 
 server_ip() {
+  if [[ -n "${SERVER_IP_CACHE}" ]]; then
+    echo "${SERVER_IP_CACHE}"
+    return
+  fi
   local ip
   ip="$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   [[ -n "${ip}" ]] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [[ -n "${ip}" ]] || ip="127.0.0.1"
+  SERVER_IP_CACHE="${ip}"
   echo "${ip}"
+}
+
+server_domain() {
+  local domain=""
+  [[ -f "${DOMAIN_FILE}" ]] && domain="$(head -n1 "${DOMAIN_FILE}" 2>/dev/null)"
+  [[ -n "${domain}" ]] || domain="$(load_domain_from_menu_conf)"
+  echo "${domain}"
+}
+
+load_domain_from_menu_conf() {
+  local key value
+  [[ -f "${MENU_CONF}" ]] || return
+  while IFS='=' read -r key value; do
+    [[ "${key}" == "FAKE_HOST" && -n "${value}" ]] && echo "${value}"
+  done < "${MENU_CONF}"
+}
+
+service_badge() {
+  local label="$1"
+  shift
+  local unit
+  for unit in "$@"; do
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+      printf '  │ %-12s %b\n' "${label}" "${GREEN}● açık${NC}"
+      return
+    fi
+  done
+  printf '  │ %-12s %b\n' "${label}" "${RED}● kapalı${NC}"
+}
+
+print_banner() {
+  local domain ip
+  domain="$(server_domain)"
+  ip="$(server_ip)"
+  echo -e "${CYAN}${BOLD}"
+  echo "  ╔════════════════════════════════════════════════════════╗"
+  echo "  ║                BABA YÖNETİM PANELİ  ·  VPN STACK       ║"
+  echo "  ╚════════════════════════════════════════════════════════╝"
+  echo -e "${NC}"
+  echo -e "  Sunucu : ${GREEN}${domain:-$(hostname)}${NC} ${CYAN}(${ip})${NC}"
+  echo -e "  SSH    : ${GREEN}80${NC} → ws/sshproxy · ${GREEN}10015${NC} yedek" 
+  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  service_badge "ws" ws.service
+  service_badge "haproxy" haproxy.service
+  service_badge "sing-box" sing-box.service
+  service_badge "xray" xray.service
+  service_badge "dropbear" dropbear.service dropbear-vpnstack.service
+  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 ensure_group() {
@@ -253,28 +309,59 @@ delete_account() {
 
 service_menu() {
   echo
-  systemctl is-active ws.service >/dev/null 2>&1 && echo -e " ws.service      : ${GREEN}aktif${NC}" || echo -e " ws.service      : ${RED}kapalı${NC}"
-  systemctl is-active haproxy.service >/dev/null 2>&1 && echo -e " haproxy.service : ${GREEN}aktif${NC}" || echo -e " haproxy.service : ${RED}kapalı${NC}"
-  systemctl is-active sing-box.service >/dev/null 2>&1 && echo -e " sing-box.service: ${GREEN}aktif${NC}" || echo -e " sing-box.service: ${RED}kapalı${NC}"
+  local unit
+  for unit in ws.service ws-ovpn.service haproxy.service sing-box.service xray.service dropbear.service dropbear-vpnstack.service; do
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+      printf " %-24s : %s\n" "${unit}" "${GREEN}aktif${NC}"
+    else
+      printf " %-24s : %s\n" "${unit}" "${RED}kapalı${NC}"
+    fi
+  done
   echo
   local answer
-  read -r -p "$(echo -e "${CYAN}Servisleri yeniden başlat? (e/H):${NC} ")" answer
+  read -r -p "$(echo -e "${CYAN}Aktif servisleri yeniden başlat? (e/H):${NC} ")" answer
   if [[ "${answer}" =~ ^[eEyY]$ ]]; then
-    systemctl restart ws.service 2>/dev/null
-    systemctl restart haproxy.service 2>/dev/null
-    systemctl restart sing-box.service 2>/dev/null
-    echo -e "${GREEN}Servisler yeniden başlatıldı.${NC}"
+    for unit in ws.service haproxy.service sing-box.service xray.service; do
+      if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+        systemctl restart "${unit}" 2>/dev/null || echo -e "${RED}${unit} yeniden başlatılamadı.${NC}"
+      fi
+    done
+    echo -e "${GREEN}Aktif servisler yeniden başlatıldı.${NC}"
   fi
 }
 
 system_info() {
+  load_menu_conf
+  local domain tls_expiry
+  domain="$(server_domain)"
   echo
   echo -e " Sunucu IP : ${GREEN}$(server_ip)${NC}"
+  echo -e " Domain    : ${GREEN}${domain:-<tanımsız>}${NC}"
   echo -e " SSH Port  : ${GREEN}${SSH_PORT_PUBLIC}${NC} (haproxy) / ${GREEN}${SSH_PORT_DIRECT}${NC} (ws)"
   echo -e " Hedef     : ${GREEN}${SSH_TARGET}${NC}"
   echo -e " SSH Host  : ${GREEN}${FAKE_HOST:-${DEFAULT_HOST}}${NC}"
   echo -e " Sing-box  : ${GREEN}${SINGBOX_CONFIG}${NC}"
+  echo -e " Xray      : ${GREEN}/etc/xray/config.json${NC}"
+  if [[ -f /etc/xray/xray.crt ]]; then
+    tls_expiry="$(openssl x509 -in /etc/xray/xray.crt -noout -enddate 2>/dev/null | cut -d= -f2)"
+    echo -e " TLS Bitiş : ${GREEN}${tls_expiry:-okunamadı}${NC}"
+  fi
   echo
+}
+
+run_xray_panel() {
+  if [[ ! -x "${XRAY_PANEL_BIN}" ]]; then
+    echo -e "${RED}Xray paneli kurulu değil (${XRAY_PANEL_BIN}). install.sh çalıştırın.${NC}"
+    return 1
+  fi
+  echo -e "${YELLOW}Not: v2ray-agent kendi kurulum ve servis düzenini yönetir;${NC}"
+  echo -e "${YELLOW}mevcut haproxy (80/443), sing-box ve sshproxy yapılandırmasını değiştirebilir.${NC}"
+  echo -e "${YELLOW}Üretimde önce: vpnctl backup${NC}"
+  local answer
+  read -r -p "$(echo -e "${CYAN}Xray paneli açılsın mı? (e/H):${NC} ")" answer
+  if [[ "${answer}" =~ ^[eEyY]$ ]]; then
+    bash "${XRAY_PANEL_BIN}"
+  fi
 }
 
 run_singbox_manager() {
@@ -499,22 +586,20 @@ singbox_menu() {
 
 menu() {
   echo -e "${CYAN}${BOLD}"
-  echo "  ╔════════════════════════════════════════╗"
-  echo "  ║            BABA YÖNETİM MENÜSÜ         ║"
-  echo "  ╠════════════════════════════════════════╣"
-  echo "  ║  [1] SSH Hesabı Oluştur (otomatik)     ║"
-  echo "  ║  [2] Hesapları Listele                 ║"
-  echo "  ║  [3] Hesap Sil                         ║"
-  echo "  ║  [4] Servis Durumu / Yeniden Başlat    ║"
-  echo "  ║  [5] Sistem Bilgisi                    ║"
-  echo "  ║  [6] Sing-box Manager                 ║"
-  echo "  ║  [7] İstemci Ayarları (Host/Header)    ║"
-  echo "  ║  [0] Çıkış                             ║"
-  echo "  ╚════════════════════════════════════════╝"
+  echo "  ╔════════════════════════════════════════════════════════╗"
+  echo "  ║                      İŞLEM MENÜSÜ                      ║"
+  echo "  ╠════════════════════════════════════════════════════════╣"
+  echo "  ║  [1] SSH Hesabı Oluştur      [5] Sistem Bilgisi        ║"
+  echo "  ║  [2] Hesapları Listele       [6] Xray Yönetimi (va)    ║"
+  echo "  ║  [3] Hesap Sil               [7] Sing-box Manager      ║"
+  echo "  ║  [4] Servisler               [8] İstemci Ayarları      ║"
+  echo "  ║  [0] Çıkış                                             ║"
+  echo "  ╚════════════════════════════════════════════════════════╝"
   echo -e "${NC}"
 }
 
 while true; do
+  print_banner
   menu
   read -r -p "$(echo -e "${CYAN}Seçim:${NC} ")" choice
   case "${choice}" in
@@ -523,8 +608,9 @@ while true; do
     3) delete_account ;;
     4) service_menu ;;
     5) system_info ;;
-    6) run_singbox_manager ;;
-    7) client_settings ;;
+    6) run_xray_panel ;;
+    7) run_singbox_manager ;;
+    8) client_settings ;;
     0) echo -e "${GREEN}Çıkılıyor.${NC}"; exit 0 ;;
     *) echo -e "${RED}Geçersiz seçim.${NC}" ;;
   esac
