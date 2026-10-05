@@ -11,6 +11,8 @@ A lightweight VPN management stack written in Go, consisting of an SSH WebSocket
 | `singbox` | Community sing-box manager (add node/user) | `/usr/local/bin/singbox` |
 | `sblink` | Derives the REALITY public key (`tag=pbk`) | `/usr/local/bin/sblink` |
 | `vpnctl` | Health check, status, links, backup/restore | `/usr/local/bin/vpnctl` |
+| `xray` | Multi-protocol core (VLESS/VMess/Trojan WS+gRPC) used by the legacy profile | `/usr/local/bin/xray` |
+| `va` | Vendored Xray terminal panel ([mack-a/v2ray-agent](scripts/v2ray-agent/UPSTREAM.md)) | `/usr/local/bin/va` |
 | `haproxy` | 80: WS/SSH frontend · 443: SNI passthrough (REALITY) | system |
 | `dropbear`/`sshd` | SSH authentication | system |
 
@@ -21,6 +23,28 @@ sudo bash install.sh
 ```
 
 Requirements: Ubuntu 22.04/24.04, root. The script installs dependencies, sets up sing-box + Go, deploys the haproxy configuration (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`), and installs the services (ws, ws-ovpn, haproxy, sing-box, dropbear-vpnstack, fail2ban).
+
+The SSH backend is handled without assuming a clean server: if a dropbear already listens on `127.0.0.1:109` and `:143`, it is adopted untouched; otherwise the `dropbear` package is installed (apt is retried) and run as `dropbear-vpnstack`. If dropbear cannot be installed, the install fails instead of leaving raw SSH on port 80 silently broken (`VPNSTACK_SKIP_DROPBEAR=1` overrides deliberately).
+
+On a server that already runs a legacy multi-protocol layout (TLS terminated by haproxy on 443, extra ports), install that profile instead of the REALITY passthrough:
+
+```bash
+sudo VPNSTACK_HAPROXY_PROFILE=legacy bash install.sh
+```
+
+The installer resolves the domain and TLS certificate automatically when they
+already exist on the server: `/etc/xray/xray.crt|key`, `/etc/haproxy/hap.pem`
+(split into cert+key), `/etc/letsencrypt/live/*`, `~/.acme.sh/*` and
+`/etc/v2ray-agent/tls/*` are searched in that order, and the domain comes from
+`/etc/xray/domain` or the certificate CN. `VPNSTACK_DOMAIN`,
+`VPNSTACK_CERT_PATH` and `VPNSTACK_KEY_PATH` override the search; if nothing is
+found the installer prompts (interactive runs) and finally generates a
+self-signed pair. The pair lands in `/etc/xray/xray.crt|key` and, in the legacy
+profile, is bundled into `/etc/haproxy/hap.pem`. Legacy SSH bridge files
+(`ws.py`) and old `ws` units are backed up to `/etc/sshvpn/legacy/` and
+`*.vpnstack-backup` before being replaced. Xray is adopted when already present
+and otherwise installed from a pinned release; the vendored panel is only
+placed on disk (`va`), never run by the installer.
 
 Downloads are checksum-verified: sing-box and Go come from pinned releases with
 pinned hashes, and a mismatch aborts the install. To pin a different sing-box
@@ -39,6 +63,7 @@ vendor the script, rather than letting an unverified script run as root.
 
 ```bash
 baba                  # terminal menu (SSH accounts + client settings)
+va                    # Xray management panel (vendored v2ray-agent)
 singbox               # sing-box node/user management
 vpnctl status         # overall status
 vpnctl doctor         # health check (exit code 1 if anything is wrong)
@@ -56,6 +81,9 @@ vpnctl restore <file> # restore from a backup (--yes to skip confirmation)
 | 443 | haproxy SNI passthrough → REALITY nodes (localhost 1443-1447) |
 | 10015 | `sshproxy` (SSH bridge, localhost) |
 | 10012 | `sshproxy` (OpenVPN-over-WS, localhost) |
+| 10000-10007 | `xray`: stats API + VLESS/VMess/Trojan WS and gRPC inbounds (localhost, legacy profile) |
+
+With `VPNSTACK_HAPROXY_PROFILE=legacy` the haproxy frontend additionally publishes 8080/8880/2082 (HTTP) and 8443/2096/2087 (TLS).
 
 ## Security model
 
