@@ -12,6 +12,20 @@ ok()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 die()  { echo -e "${RED}[x]${NC} $*" >&2; exit 1; }
 
+# verify_sha256 <file> <expected> — refuses to continue on mismatch. An empty
+# expected value means "no published checksum is available"; callers must decide
+# explicitly whether that is acceptable rather than silently trusting the bytes.
+verify_sha256() {
+  local file="$1" expected="$2" label="$3" actual
+  if [[ -z "${expected}" ]]; then
+    warn "${label}: yayımlanmış sağlama özeti yok, indirilen dosya doğrulanmadı."
+    return 0
+  fi
+  actual="$(sha256sum "${file}" | cut -d' ' -f1)"
+  [[ "${actual}" == "${expected}" ]] || die "${label} sağlama özeti uyuşmuyor (beklenen ${expected}, gelen ${actual})."
+  ok "${label} sağlama özeti doğrulandı."
+}
+
 [[ "${EUID}" -eq 0 ]] || die "Bu script root olarak çalıştırılmalıdır."
 command -v apt-get >/dev/null 2>&1 || die "Bu script Ubuntu 22.04/24.04 için tasarlandı."
 
@@ -37,7 +51,38 @@ SINGBOX_BIN="/usr/local/bin/sing-box"
 
 log "Sing-box kuruluyor..."
 if ! command -v sing-box >/dev/null 2>&1; then
-  curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1 || die "Sing-box kurulumu başarısız."
+  # Upstream publishes no checksum file, so pin the release hashes here. This
+  # replaces "curl … | bash" against a moving "main" branch: the download is now
+  # a pinned release, verified before anything is extracted or executed.
+  SB_VERSION="${SINGBOX_VERSION:-1.14.2}"
+  # The hashes below belong to 1.14.2. Allowing a version override without
+  # supplying its hashes would compare the wrong bytes and fail confusingly, so
+  # an override must carry its own expected checksum.
+  case "${SB_VERSION}" in
+    1.14.2)
+      case "$(dpkg --print-architecture)" in
+        amd64) SB_ARCH="amd64"; SB_SHA="a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6" ;;
+        arm64) SB_ARCH="arm64"; SB_SHA="b43a1fb1bda131c6653576741ce527eb2bdeab7c9308ca90ee8b972abb7e4a7f" ;;
+        *) die "Desteklenmeyen mimari: $(dpkg --print-architecture)" ;;
+      esac
+      ;;
+    *)
+      [[ -n "${SINGBOX_SHA256:-}" ]] || die "SINGBOX_VERSION=${SB_VERSION} için SINGBOX_SHA256 belirtilmeli."
+      case "$(dpkg --print-architecture)" in
+        amd64) SB_ARCH="amd64" ;;
+        arm64) SB_ARCH="arm64" ;;
+        *) die "Desteklenmeyen mimari: $(dpkg --print-architecture)" ;;
+      esac
+      SB_SHA="${SINGBOX_SHA256}"
+      ;;
+  esac
+  SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+  curl -fsSL "${SB_URL}" -o /tmp/sing-box.tar.gz || die "Sing-box arşivi indirilemedi: ${SB_URL}"
+  verify_sha256 /tmp/sing-box.tar.gz "${SB_SHA}" "sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+
+  tar -C /tmp -xzf /tmp/sing-box.tar.gz
+  install -m 0755 "/tmp/sing-box-${SB_VERSION}-linux-${SB_ARCH}/sing-box" /usr/local/bin/sing-box
+  rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VERSION}-linux-${SB_ARCH}"
 fi
 mkdir -p "${SINGBOX_DIR}"
 # Yığın sing-box dosyalarını /usr/local altında bekler (singbox yöneticisi ve Go araçları).
@@ -79,7 +124,17 @@ log "Sing-box Manager kuruluyor..."
 if [[ -f "${SCRIPT_DIR}/scripts/singbox-manager.sh" ]]; then
   install -m 0755 "${SCRIPT_DIR}/scripts/singbox-manager.sh" /root/singbox.sh
 else
-  wget -N -q -O /root/singbox.sh https://raw.githubusercontent.com/TheyCallMeSecond/sing-box-manager/main/Install.sh || warn "Sing-box Manager indirilemedi."
+  # Upstream publishes no checksum for this file. Rather than trust the bytes,
+  # require the operator to pin one:
+  #   git clone the upstream repo, then
+  #   sha256sum Install.sh
+  # Refusing here is deliberate — this script runs as root, so an unverified
+  # download is arbitrary code execution. Set SINGBOX_MANAGER_SHA256 to the
+  # reviewed hash, or vendor scripts/singbox-manager.sh into the repo and
+  # re-run to take the verified path above.
+  : "${SINGBOX_MANAGER_SHA256:?set SINGBOX_MANAGER_SHA256 to the reviewed sha256 of Install.sh, or vendor scripts/singbox-manager.sh}"
+  wget -N -q -O /root/singbox.sh https://raw.githubusercontent.com/TheyCallMeSecond/sing-box-manager/main/Install.sh || die "Sing-box Manager indirilemedi."
+  verify_sha256 /root/singbox.sh "${SINGBOX_MANAGER_SHA256}" "sing-box-manager Install.sh"
   chmod +x /root/singbox.sh 2>/dev/null || true
 fi
 ln -sf /root/singbox.sh /usr/local/bin/singbox
@@ -93,6 +148,15 @@ case "$(dpkg --print-architecture)" in
 esac
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION}"; then
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tar.gz
+  # go.dev publishes one checksum per release file; fetch it rather than pinning a
+  # copy here, so a compromised mirror cannot redefine the expected value. A
+  # missing checksum file is fatal: verifying against an empty string is worse
+  # than not verifying at all.
+  GO_SHA="$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" 2>/dev/null \
+    | jq -r --arg v "go${GO_VERSION}" --arg f "go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
+        '.[] | select(.version == $v) | .files[] | select(.filename == $f) | .sha256' 2>/dev/null || true)"
+  [[ -n "${GO_SHA}" ]] || die "Go ${GO_VERSION} sağlama özeti alınamadı; kurulum durduruldu."
+  verify_sha256 /tmp/go.tar.gz "${GO_SHA}" "go${GO_VERSION}.tar.gz"
   rm -rf /usr/local/go
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
@@ -165,11 +229,46 @@ else
 fi
 ok "ws.service, ws-ovpn.service yapılandırıldı."
 
-for p in 109 143; do
-  if ! (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then
-    warn "127.0.0.1:${p} dinlemiyor — doğrudan SSH için dropbear'ı bu portta yapılandırın."
+log "SSH arka ucu kuruluyor..."
+# haproxy routes raw SSH on port 80 to 127.0.0.1:143 and sshproxy defaults to
+# 127.0.0.1:109, so dropbear has to listen on both or that path is dead. Without
+# this the failure is silent: haproxy accepts the connection and the backend
+# refuses it.
+if ! command -v dropbear >/dev/null 2>&1; then
+  apt-get install -y -qq dropbear >/dev/null 2>&1 || warn "dropbear kurulamadı."
+fi
+if [[ -x /usr/sbin/dropbear ]]; then
+  # -R makes dropbear generate any missing host key on startup, so there is no
+  # need to run dropbearkey here (note: -f is the keygen output flag, and the
+  # type is "ecdsa", not "ecdsa-sha2-nistp256"). -p is repeatable, up to 10
+  # ports. openssh-server on :22 is left running as a rescue path.
+  cat > /etc/systemd/system/dropbear-vpnstack.service <<EOF
+[Unit]
+Description=dropbear (vpnstack backends 109/143)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable dropbear-vpnstack >/dev/null 2>&1 || true
+  # Ubuntu's packaged unit also binds :22 and writes the same pidfile; keep it
+  # off so the two do not collide.
+  systemctl disable --now dropbear >/dev/null 2>&1 || true
+  if systemctl restart dropbear-vpnstack >/dev/null 2>&1; then
+    ok "dropbear 127.0.0.1:109 ve :143 dinliyor."
+  else
+    warn "dropbear-vpnstack başlatılamadı; journalctl -u dropbear-vpnstack"
   fi
-done
+else
+  warn "dropbear kurulu değil; yalnızca openssh-server (:22) kullanılabilir."
+fi
 
 log "fail2ban yapılandırılıyor..."
 JAILS=""

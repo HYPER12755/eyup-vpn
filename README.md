@@ -20,7 +20,20 @@ A lightweight VPN management stack written in Go, consisting of an SSH WebSocket
 sudo bash install.sh
 ```
 
-Requirements: Ubuntu 22.04/24.04, root. The script installs dependencies, sets up sing-box + Go, deploys the haproxy configuration (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`), and installs the services (ws, ws-ovpn, haproxy, sing-box, fail2ban).
+Requirements: Ubuntu 22.04/24.04, root. The script installs dependencies, sets up sing-box + Go, deploys the haproxy configuration (`deploy/haproxy.cfg` → `/etc/haproxy/haproxy.cfg`), and installs the services (ws, ws-ovpn, haproxy, sing-box, dropbear-vpnstack, fail2ban).
+
+Downloads are checksum-verified: sing-box and Go come from pinned releases with
+pinned hashes, and a mismatch aborts the install. To pin a different sing-box
+version, supply its hash:
+
+```bash
+SINGBOX_VERSION=1.15.0 SINGBOX_SHA256=<sha256> sudo -E bash install.sh
+```
+
+If the repo already contains `scripts/singbox-manager.sh`, install.sh uses
+that copy and skips the third-party download. Otherwise it fetches
+`Install.sh` from upstream and requires `SINGBOX_MANAGER_SHA256` — set it, or
+vendor the script, rather than letting an unverified script run as root.
 
 ## Usage
 

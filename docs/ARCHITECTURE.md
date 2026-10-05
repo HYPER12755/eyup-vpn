@@ -19,6 +19,7 @@ Client ──(443, TLS ClientHello)──► haproxy reality_frontend (SNI passt
 - **haproxy:** the configuration is installed from the `deploy/haproxy.cfg` source to `/etc/haproxy/haproxy.cfg`.
   - `http_frontend` (80/8080): **pure TCP**. The first bytes are inspected with `tcp-request content accept if HTTP`; requests starting with `GET`/`CONNECT` go to `ws_backend` (10015), the rest (raw `SSH-2.0-...`) to `dropbear_backend` (143). Since headers are not parsed, `X-Real-Host`/`X-Split` pass through untouched.
   - `reality_frontend` (443): TCP passthrough to the REALITY nodes based on the TLS ClientHello SNI. Unknown SNI → the whatsapp node (camouflage is preserved).
+- **SSH backend:** dropbear listens on `127.0.0.1:109` and `127.0.0.1:143` under the `dropbear-vpnstack` unit (installed by `install.sh`). haproxy sends raw SSH to 143; `sshproxy` defaults to 109. `openssh-server` stays on `:22` as a rescue path — **keep an active session open while changing SSH config**.
 - **sing-box:** `/usr/local/etc/sing-box/config.json`; nodes listen on `127.0.0.1` only. Each REALITY node's `handshake.server` field is its own SNI. The `sing-box` binary is expected at `/usr/local/bin/sing-box` (if it lives elsewhere, `/usr/bin/sing-box` is symlinked).
 - **Linux accounts:** in the `sshvpn` group, shell `/bin/false`, expiry set with `chage`. The `baba` menu generates random usernames/passwords.
 

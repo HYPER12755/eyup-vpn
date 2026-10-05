@@ -56,3 +56,5 @@ haproxy -c -f /etc/haproxy/haproxy.cfg
 - **SSH connection dropping:** check `journalctl -u ws` and `pgrep -af sshproxy`; re-fetch the client payload (including Sec-WebSocket-Key) from the `baba` menu.
 - **Client connects but no data flows:** a WebSocket client must send its first frame within 2 s of the handshake, otherwise `sshproxy` falls back to raw relay. See [PROTOCOL.md](PROTOCOL.md#framing-selection).
 - **`400 BadTarget`:** the `X-Real-Host` port was empty or out of range. `403 Forbidden` means the target was not loopback and no password is compiled in.
+- **Raw SSH on port 80 fails but the WebSocket path works:** haproxy sends raw SSH to `127.0.0.1:143` and `sshproxy` defaults to `127.0.0.1:109`. Both must be listening; `install.sh` runs dropbear on both via the `dropbear-vpnstack` unit. Check with `ss -ltn | grep -E '109|143'`.
+- **`systemctl restart dropbear-vpnstack` fails:** run it in the foreground to see the error — `/usr/sbin/dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143`. If it exits immediately, a host key could not be created in `/etc/dropbear/`.
