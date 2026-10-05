@@ -192,13 +192,201 @@ install -m 0755 "${STACK_DIR}/scripts/vpnmenu.sh" /usr/local/bin/vpnmenu
 ln -sf /usr/local/bin/vpnmenu /usr/local/bin/baba
 ok "Kuruldu: sshproxy + sblink + vpnctl + vpnmenu (baba)"
 
+# ---------------------------------------------------------- Keşif ve sahiplenme
+# Üzerine kurulum yapılan sunucuda sertifika ve SSH tüneli dosyaları zaten
+# olabilir (eski VPN scriptleri, acme.sh, certbot, v2ray-agent, hap.pem). Bu
+# bölüm her şeyi otomatik tarar: bulduğunu sahiplenir, bulamadığını sorar ya da
+# üretir. Sıra: VPNSTACK_* ortam değişkenleri > otomatik keşif > soru > üretim.
+log "Sertifika ve SSH tüneli dosyaları taranıyor..."
+
+mkdir -p /etc/sshvpn
+if [[ ! -f /etc/sshvpn/menu.conf ]]; then
+  printf 'FAKE_HOST=\nEXTRA_HEADER=\n' > /etc/sshvpn/menu.conf
+  chmod 600 /etc/sshvpn/menu.conf
+fi
+
+# Bilinen kurulumların sertifika konumlarını sırayla dener; bulduğunda
+# "cert|key|kaynak" basar. hap.pem birleşik bir dosyadır: iki alan da aynı
+# yolu gösterir ve bölüm aşağıda onu cert+key olarak ikiye ayırır.
+find_cert_pair() {
+  if [[ -s /etc/xray/xray.crt && -s /etc/xray/xray.key ]]; then
+    echo "/etc/xray/xray.crt|/etc/xray/xray.key|Xray düzeni"
+    return 0
+  fi
+  if [[ -s /etc/haproxy/hap.pem ]] && grep -q "PRIVATE KEY" /etc/haproxy/hap.pem; then
+    echo "/etc/haproxy/hap.pem|/etc/haproxy/hap.pem|haproxy hap.pem (birleşik)"
+    return 0
+  fi
+  local dir name
+  for dir in /etc/letsencrypt/live/*/; do
+    [[ -s "${dir}fullchain.pem" && -s "${dir}privkey.pem" ]] || continue
+    echo "${dir}fullchain.pem|${dir}privkey.pem|Let's Encrypt"
+    return 0
+  done
+  for dir in /root/.acme.sh/*/; do
+    name="${dir%/}"; name="${name##*/}"; name="${name%_ecc}"
+    [[ -s "${dir}${name}.key" ]] || continue
+    if [[ -s "${dir}fullchain.cer" ]]; then
+      echo "${dir}fullchain.cer|${dir}${name}.key|acme.sh"
+      return 0
+    fi
+    if [[ -s "${dir}${name}.cer" ]]; then
+      echo "${dir}${name}.cer|${dir}${name}.key|acme.sh"
+      return 0
+    fi
+  done
+  for dir in /etc/v2ray-agent/tls/*.crt; do
+    [[ -s "${dir}" && -s "${dir%.crt}.key" ]] || continue
+    echo "${dir}|${dir%.crt}.key|v2ray-agent TLS"
+    return 0
+  done
+  return 1
+}
+
+# Domaini önce dosyadan, yoksa bulunan sertifikanın CN alanından çıkarır.
+discover_domain() {
+  local domain="" pair
+  if [[ -s /etc/xray/domain ]]; then
+    domain="$(head -n1 /etc/xray/domain)"
+  fi
+  if [[ -z "${domain}" ]]; then
+    pair="$(find_cert_pair || true)"
+    if [[ -n "${pair}" ]]; then
+      domain="$(openssl x509 -in "${pair%%|*}" -noout -subject 2>/dev/null | sed -n 's/.*CN *= *//p' | head -n1)"
+    fi
+  fi
+  [[ -n "${domain}" ]] || return 1
+  echo "${domain}"
+}
+
+DOMAIN="${VPNSTACK_DOMAIN:-}"
+if [[ -z "${DOMAIN}" ]]; then
+  DOMAIN="$(discover_domain || true)"
+  [[ -n "${DOMAIN}" ]] && log "Domain sistemde bulundu: ${DOMAIN}"
+fi
+if [[ -z "${DOMAIN}" && -t 0 ]]; then
+  read -r -p "Sunucu alan adı (örn. vpn.example.com, boş = atla): " DOMAIN || true
+fi
+if [[ -n "${DOMAIN}" ]]; then
+  mkdir -p /etc/xray
+  printf '%s\n' "${DOMAIN}" > /etc/xray/domain
+  # FAKE_HOST is the decoy Host header in client payloads; only fill it in when
+  # the operator has not set one deliberately.
+  if ! grep -qE '^FAKE_HOST=.+' /etc/sshvpn/menu.conf; then
+    sed -i "s|^FAKE_HOST=.*|FAKE_HOST=${DOMAIN}|" /etc/sshvpn/menu.conf
+  fi
+  ok "Domain kaydedildi: ${DOMAIN} (/etc/xray/domain)"
+fi
+
+CERT_PATH="${VPNSTACK_CERT_PATH:-}"
+KEY_PATH="${VPNSTACK_KEY_PATH:-}"
+CERT_SOURCE=""
+if [[ -z "${CERT_PATH}" ]]; then
+  CERT_PAIR="$(find_cert_pair || true)"
+  if [[ -n "${CERT_PAIR}" ]]; then
+    IFS='|' read -r CERT_PATH KEY_PATH CERT_SOURCE <<< "${CERT_PAIR}"
+    log "Sertifika bulundu: ${CERT_SOURCE}"
+  fi
+fi
+if [[ -z "${CERT_PATH}" && -t 0 ]]; then
+  read -r -p "TLS sertifika (fullchain) yolu (boş = mevcut/self-signed): " CERT_PATH || true
+  if [[ -n "${CERT_PATH}" ]]; then
+    read -r -p "TLS özel anahtar yolu: " KEY_PATH || true
+  fi
+fi
+if [[ -n "${CERT_PATH}" ]]; then
+  if [[ "${CERT_PATH}" == "${KEY_PATH}" ]]; then
+    # Birleşik PEM (hap.pem): sertifika zinciri ile anahtarı ikiye ayır.
+    grep -q "PRIVATE KEY" "${CERT_PATH}" || die "Birleşik PEM anahtar içermiyor: ${CERT_PATH}"
+    mkdir -p /etc/xray
+    awk '/PRIVATE KEY/ { exit } { print }' "${CERT_PATH}" > /etc/xray/xray.crt
+    awk 'found || /PRIVATE KEY/ { found=1; print }' "${CERT_PATH}" > /etc/xray/xray.key
+    chmod 0644 /etc/xray/xray.crt
+    chmod 0600 /etc/xray/xray.key
+    CERT_SOURCE="${CERT_SOURCE:-birleşik PEM}"
+    ok "Sertifika ayrıştırıldı: ${CERT_PATH} → /etc/xray/xray.crt + xray.key"
+  elif [[ "${CERT_PATH}" == /etc/xray/xray.crt && "${KEY_PATH}" == /etc/xray/xray.key ]]; then
+    ok "Mevcut Xray sertifikası kullanılıyor: /etc/xray/xray.crt"
+  else
+    [[ -f "${CERT_PATH}" && -f "${KEY_PATH}" ]] || die "Sertifika/anahtar bulunamadı: cert='${CERT_PATH}' key='${KEY_PATH}'"
+    install -m 0644 "${CERT_PATH}" /etc/xray/xray.crt
+    install -m 0600 "${KEY_PATH}" /etc/xray/xray.key
+    CERT_SOURCE="${CERT_SOURCE:-verilen yol}"
+    ok "TLS sertifikası kuruldu: ${CERT_PATH} → /etc/xray/xray.crt"
+  fi
+fi
+if [[ ! -f /etc/xray/xray.crt || ! -f /etc/xray/xray.key ]]; then
+  CERT_CN="${DOMAIN:-$(hostname -f 2>/dev/null || hostname)}"
+  mkdir -p /etc/xray
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=${CERT_CN}" \
+    -keyout /etc/xray/xray.key -out /etc/xray/xray.crt >/dev/null 2>&1
+  chmod 600 /etc/xray/xray.key
+  CERT_SOURCE="self-signed (CN=${CERT_CN})"
+  ok "Self-signed sertifika üretildi (CN=${CERT_CN}); gerçek sertifika için VPNSTACK_CERT_PATH/KEY_PATH verin."
+fi
+
+# SSH tüneli destek dosyaları: grup ve eski köprünün yedeği.
+getent group sshvpn >/dev/null 2>&1 || groupadd -f sshvpn >/dev/null 2>&1 || true
+ok "sshvpn grubu hazır."
+for legacy in /etc/whoiamluna/ws.py /usr/local/bin/ws.py /root/ws.py /etc/ws.py; do
+  if [[ -f "${legacy}" ]]; then
+    mkdir -p /etc/sshvpn/legacy
+    cp -a "${legacy}" /etc/sshvpn/legacy/ws.py
+    chmod 600 /etc/sshvpn/legacy/ws.py
+    ok "Eski SSH köprüsü yedeklendi: ${legacy} → /etc/sshvpn/legacy/ws.py"
+    break
+  fi
+done
+for legacy_unit in /etc/systemd/system/ws.service /etc/systemd/system/ws-ovpn.service; do
+  if [[ -f "${legacy_unit}" ]] && ! grep -q "sshproxy" "${legacy_unit}" 2>/dev/null; then
+    # Bilinen yollarda köprü bulunamadıysa, eski birimin çalıştırdığı
+    # Python dosyasını ExecStart'tan çıkar ve onu da yedekle.
+    if [[ ! -f /etc/sshvpn/legacy/ws.py ]]; then
+      legacy_exec="$(grep -E '^ExecStart=' "${legacy_unit}" | grep -oE '/[^ ]+\.py' | head -n1)"
+      if [[ -n "${legacy_exec}" && -f "${legacy_exec}" ]]; then
+        mkdir -p /etc/sshvpn/legacy
+        cp -a "${legacy_exec}" /etc/sshvpn/legacy/ws.py
+        chmod 600 /etc/sshvpn/legacy/ws.py
+        ok "Eski SSH köprüsü birimden bulundu ve yedeklendi: ${legacy_exec} → /etc/sshvpn/legacy/ws.py"
+      fi
+    fi
+    cp -a "${legacy_unit}" "${legacy_unit}.vpnstack-backup"
+    log "Eski birim yedeklendi: ${legacy_unit}.vpnstack-backup"
+  fi
+done
+
 log "Servisler yapılandırılıyor..."
 install -m 0644 "${STACK_DIR}/deploy/ws.service" /etc/systemd/system/ws.service
 install -m 0644 "${STACK_DIR}/deploy/ws-ovpn.service" /etc/systemd/system/ws-ovpn.service
 
-HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.cfg"
+# Profil seçimi: reality (varsayılan: 443'te SNI passthrough → sing-box) veya
+# legacy (üzerine kurulum yapılan sunuculardaki TLS sonlandırmalı, ek portlu,
+# çoklu protokollü eski düzen).
+HAPROXY_PROFILE="${VPNSTACK_HAPROXY_PROFILE:-reality}"
+case "${HAPROXY_PROFILE}" in
+  reality) HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.cfg" ;;
+  legacy)  HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.legacy.cfg" ;;
+  *) die "VPNSTACK_HAPROXY_PROFILE=${HAPROXY_PROFILE} geçersiz (reality|legacy)." ;;
+esac
 HAPROXY_DST="/etc/haproxy/haproxy.cfg"
-if [[ ! -f "${HAPROXY_DST}" ]] || grep -q "# example config for haproxy" "${HAPROXY_DST}"; then
+if [[ "${HAPROXY_PROFILE}" == "legacy" ]]; then
+  if [[ -f "${HAPROXY_DST}" ]]; then
+    cp -a "${HAPROXY_DST}" "${HAPROXY_DST}.vpnstack-backup"
+    log "Mevcut haproxy.cfg yedeklendi: ${HAPROXY_DST}.vpnstack-backup"
+  fi
+  install -m 0644 "${HAPROXY_SRC}" "${HAPROXY_DST}"
+  # The legacy frontend terminates TLS on 443, so haproxy needs the cert and key
+  # in one file. It is derived from the /etc/xray pair the installer just
+  # ensured, which is also what makes the same certificate usable for SSH.
+  if [[ -f /etc/xray/xray.crt && -f /etc/xray/xray.key ]]; then
+    cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/haproxy/hap.pem
+    chmod 600 /etc/haproxy/hap.pem
+    ok "hap.pem üretildi (443 TLS): /etc/haproxy/hap.pem."
+  else
+    warn "legacy profil 443 için hap.pem gerekli; /etc/xray sertifikası bulunamadı."
+  fi
+  ok "haproxy.cfg legacy profille kuruldu (80/8080/8880/2082 · 443 TLS · WS 10015 · SSH 143)."
+elif [[ ! -f "${HAPROXY_DST}" ]] || grep -q "# example config for haproxy" "${HAPROXY_DST}"; then
   if [[ -f "${HAPROXY_DST}" ]]; then
     cp -a "${HAPROXY_DST}" "${HAPROXY_DST}.vpnstack-backup"
     log "Stok haproxy.cfg yedeklendi: ${HAPROXY_DST}.vpnstack-backup"
@@ -206,7 +394,18 @@ if [[ ! -f "${HAPROXY_DST}" ]] || grep -q "# example config for haproxy" "${HAPR
   install -m 0644 "${HAPROXY_SRC}" "${HAPROXY_DST}"
   ok "haproxy.cfg kuruldu (80: WS/SSH · 443: REALITY SNI)."
 elif ! grep -q "# vpnstack" "${HAPROXY_DST}"; then
-  warn "${HAPROXY_DST} elle düzenlenmiş görünüyor; dokunulmadı. Eksik REALITY/SNI ve WS yönlendirmesini elle ekleyin."
+  # Elle düzenlenmiş ya da başka bir kurulumdan gelen yapılandırma korunur,
+  # ama vpnstack SSH yolunun iki bacağı yine de aranır; eksik olan tam olarak
+  # söylenir, çünkü sessiz kalan bir eksiklik SSH'ı çalışmaz bırakır.
+  HAPROXY_MISSING=""
+  grep -q "10015" "${HAPROXY_DST}" || HAPROXY_MISSING="${HAPROXY_MISSING} WebSocket→127.0.0.1:10015"
+  grep -qE 'server[^#]*:143\b' "${HAPROXY_DST}" || HAPROXY_MISSING="${HAPROXY_MISSING} ham SSH→127.0.0.1:143"
+  if [[ -n "${HAPROXY_MISSING}" ]]; then
+    warn "${HAPROXY_DST} elle düzenlenmiş görünüyor; dokunulmadı. Eksik yönlendirme:${HAPROXY_MISSING}."
+    warn "deploy/haproxy.cfg'yi örnek alın ya da VPNSTACK_HAPROXY_PROFILE=legacy ile çalışan düzeni kurun."
+  else
+    ok "Mevcut haproxy.cfg korundu; vpnstack yolları (WS 10015, SSH 143) doğrulandı."
+  fi
 else
   ok "Mevcut haproxy.cfg korundu (düzenlemeleriniz silinmedi)."
 fi
@@ -234,40 +433,205 @@ log "SSH arka ucu kuruluyor..."
 # 127.0.0.1:109, so dropbear has to listen on both or that path is dead. Without
 # this the failure is silent: haproxy accepts the connection and the backend
 # refuses it.
-if ! command -v dropbear >/dev/null 2>&1; then
-  apt-get install -y -qq dropbear >/dev/null 2>&1 || warn "dropbear kurulamadı."
-fi
-if [[ -x /usr/sbin/dropbear ]]; then
-  # -R makes dropbear generate any missing host key on startup, so there is no
-  # need to run dropbearkey here (note: -f is the keygen output flag, and the
-  # type is "ecdsa", not "ecdsa-sha2-nistp256"). -p is repeatable, up to 10
-  # ports. openssh-server on :22 is left running as a rescue path.
-  cat > /etc/systemd/system/dropbear-vpnstack.service <<EOF
+#
+# Kurulum iki sunucu tipini ayırt eder:
+#   1. dropbear zaten 109 ve 143'ü dinliyor (üzerine kurulum yapılan eski/mevcut
+#      VPN düzeni): dokunulmaz, olduğu gibi sahiplenilir.
+#   2. hiç yok: apt ile kurulur; kurulamazsa sessizce devam etmek yerine hata
+#      verilir, çünkü eksik dropbear SSH-80 yolunu ölü bırakır.
+
+listening_on() {
+  ss -ltnH "sport = :$1" 2>/dev/null | grep -q .
+}
+
+dropbear_binary() {
+  if [[ -x /usr/sbin/dropbear ]]; then
+    echo /usr/sbin/dropbear
+  elif command -v dropbear >/dev/null 2>&1; then
+    command -v dropbear
+  else
+    # Boş döner ama başarılı sayılır: `set -e` altında bulunamayan bir ikili
+    # yüzünden betiğin burada ölmesi yerine kurulum akışı devam etmeli.
+    echo ""
+  fi
+}
+
+listening_process_name() {
+  ss -ltnpH "sport = :$1" 2>/dev/null | sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p' | head -n1
+}
+
+if listening_on 109 && listening_on 143; then
+  OWNER_109="$(listening_process_name 109)"
+  OWNER_143="$(listening_process_name 143)"
+  ok "Mevcut dinleyiciler sahiplenildi — :109 ${OWNER_109:-?} · :143 ${OWNER_143:-?}"
+  for pair in "109:${OWNER_109}" "143:${OWNER_143}"; do
+    PORT="${pair%%:*}"; OWNER="${pair#*:}"
+    if [[ -n "${OWNER}" && "${OWNER}" != *dropbear* ]]; then
+      warn "port ${PORT} dropbear değil (${OWNER}) tarafından tutuluyor; SSH-80 yolu beklendiği gibi çalışmayabilir."
+    fi
+  done
+  if ss -ltnH "sport = :143" 2>/dev/null | grep -qE '0\.0\.0\.0|\*|\[::\]'; then
+    warn "dropbear :143 tüm arayüzlerde dinliyor; yalnızca 127.0.0.1 olması önerilir."
+  fi
+else
+  DROPBEAR_BIN="$(dropbear_binary)"
+  if [[ -z "${DROPBEAR_BIN}" ]]; then
+    log "dropbear kuruluyor (apt)…"
+    for attempt in 1 2 3; do
+      apt-get update -qq >/dev/null 2>&1 || true
+      if apt-get install -y -qq dropbear >/dev/null 2>&1 || apt-get install -y -qq dropbear-bin >/dev/null 2>&1; then
+        break
+      fi
+      warn "dropbear kurulum denemesi ${attempt}/3 başarısız."
+      sleep 2
+    done
+    DROPBEAR_BIN="$(dropbear_binary)"
+  fi
+
+  if [[ -z "${DROPBEAR_BIN}" ]]; then
+    if [[ "${VPNSTACK_SKIP_DROPBEAR:-0}" == "1" ]]; then
+      warn "dropbear kurulamadı; VPNSTACK_SKIP_DROPBEAR=1 ile yoksayıldı (SSH-80 yolu çalışmaz)."
+    else
+      die "dropbear kurulamadı (apt). SSH-80 yolu (haproxy → 127.0.0.1:143) çalışmaz. apt durumunu düzeltip yeniden deneyin; bilerek yoksaymak için VPNSTACK_SKIP_DROPBEAR=1."
+    fi
+  else
+    # -R makes dropbear generate any missing host key on startup, so there is no
+    # need to run dropbearkey here (note: -f is the keygen output flag, and the
+    # type is "ecdsa", not "ecdsa-sha2-nistp256"). -p is repeatable, up to 10
+    # ports. openssh-server on :22 is left running as a rescue path.
+    cat > /etc/systemd/system/dropbear-vpnstack.service <<EOF
 [Unit]
 Description=dropbear (vpnstack backends 109/143)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143
+ExecStart=${DROPBEAR_BIN} -F -R -p 127.0.0.1:109 -p 127.0.0.1:143
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable dropbear-vpnstack >/dev/null 2>&1 || true
-  # Ubuntu's packaged unit also binds :22 and writes the same pidfile; keep it
-  # off so the two do not collide.
-  systemctl disable --now dropbear >/dev/null 2>&1 || true
-  if systemctl restart dropbear-vpnstack >/dev/null 2>&1; then
-    ok "dropbear 127.0.0.1:109 ve :143 dinliyor."
-  else
-    warn "dropbear-vpnstack başlatılamadı; journalctl -u dropbear-vpnstack"
+    systemctl daemon-reload
+    systemctl enable dropbear-vpnstack >/dev/null 2>&1 || true
+    # Ubuntu's packaged unit also binds :22 and writes the same pidfile; keep it
+    # off so the two do not collide.
+    systemctl disable --now dropbear >/dev/null 2>&1 || true
+    systemctl restart dropbear-vpnstack >/dev/null 2>&1 || true
+    DROPBEAR_STARTED=false
+    for _ in $(seq 1 10); do
+      if listening_on 109 && listening_on 143; then
+        DROPBEAR_STARTED=true
+        break
+      fi
+      sleep 0.5
+    done
+    if [[ "${DROPBEAR_STARTED}" == true ]]; then
+      ok "dropbear 127.0.0.1:109 ve :143 dinliyor."
+    else
+      warn "dropbear-vpnstack başlatılamadı ya da portları tutamadı: journalctl -u dropbear-vpnstack"
+      ss -ltnp 2>/dev/null | grep -E ':(109|143)\b' || true
+    fi
   fi
+fi
+
+# ---------------------------------------------------------------- Xray core
+# Adopt-first, like dropbear: a server that already runs Xray (the legacy
+# multi-protocol layout keeps the binary in /usr/local/bin and the config in
+# /etc/xray) is left running exactly as it is. Only a missing install is added,
+# from a pinned, checksum-verified release.
+log "Xray kuruluyor..."
+XRAY_BIN="/usr/local/bin/xray"
+if command -v xray >/dev/null 2>&1 || [[ -x "${XRAY_BIN}" ]]; then
+  XRAY_REAL="$(command -v xray 2>/dev/null || echo "${XRAY_BIN}")"
+  if [[ "${XRAY_REAL}" != "${XRAY_BIN}" ]]; then
+    ln -sf "${XRAY_REAL}" "${XRAY_BIN}"
+  fi
+  ok "Mevcut Xray sahiplenildi: $("${XRAY_BIN}" version 2>/dev/null | head -n1)"
 else
-  warn "dropbear kurulu değil; yalnızca openssh-server (:22) kullanılabilir."
+  XRAY_VERSION="${XRAY_VERSION:-v26.3.27}"
+  # The hashes below are the published .dgst values for v26.3.27. A version
+  # override must carry its own sha256; otherwise the download would be
+  # compared against the pins of a different release and fail confusingly.
+  case "${XRAY_VERSION}" in
+    v26.3.27)
+      case "$(dpkg --print-architecture)" in
+        amd64) XRAY_ARCH="64"; XRAY_SHA="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae" ;;
+        arm64) XRAY_ARCH="arm64-v8a"; XRAY_SHA="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c" ;;
+        *) die "Desteklenmeyen mimari: $(dpkg --print-architecture)" ;;
+      esac
+      ;;
+    *)
+      [[ -n "${XRAY_SHA256:-}" ]] || die "XRAY_VERSION=${XRAY_VERSION} için XRAY_SHA256 belirtilmeli."
+      case "$(dpkg --print-architecture)" in
+        amd64) XRAY_ARCH="64" ;;
+        arm64) XRAY_ARCH="arm64-v8a" ;;
+        *) die "Desteklenmeyen mimari: $(dpkg --print-architecture)" ;;
+      esac
+      XRAY_SHA="${XRAY_SHA256}"
+      ;;
+  esac
+  XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"
+  curl -fsSL "${XRAY_URL}" -o /tmp/xray.zip || die "Xray arşivi indirilemedi: ${XRAY_URL}"
+  verify_sha256 /tmp/xray.zip "${XRAY_SHA}" "Xray-linux-${XRAY_ARCH}.zip"
+  rm -rf /tmp/xray-extract
+  mkdir -p /tmp/xray-extract
+  unzip -oq /tmp/xray.zip -d /tmp/xray-extract
+  install -m 0755 /tmp/xray-extract/xray "${XRAY_BIN}"
+  rm -rf /tmp/xray.zip /tmp/xray-extract
+  ok "Xray kuruldu: $("${XRAY_BIN}" version 2>/dev/null | head -n1)"
+fi
+
+mkdir -p /etc/xray /var/log/xray
+XRAY_CONFIG_CHANGED=false
+if [[ ! -s /etc/xray/config.json ]]; then
+  # The template is the marker-based layout the legacy manager expects: users
+  # live between #& user lines and each protocol has an insertion marker
+  # (#vless, #vmess, ...).
+  install -m 0644 "${STACK_DIR}/deploy/xray.config.json" /etc/xray/config.json
+  XRAY_CONFIG_CHANGED=true
+  ok "Xray config şablonu kuruldu: /etc/xray/config.json"
+fi
+if [[ ! -f /etc/systemd/system/xray.service ]]; then
+  cat > /etc/systemd/system/xray.service <<EOF
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/XTLS/Xray-core
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=${XRAY_BIN} run -config /etc/xray/config.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  ok "xray.service kuruldu."
+fi
+systemctl enable xray >/dev/null 2>&1 || true
+if systemctl is-active --quiet xray && [[ "${XRAY_CONFIG_CHANGED}" != true ]]; then
+  ok "xray.service zaten çalışıyor; dokunulmadı."
+elif systemctl restart xray >/dev/null 2>&1 && listening_on 10000; then
+  ok "xray.service çalışıyor (stats API 127.0.0.1:10000)."
+else
+  warn "xray.service başlatılamadı ya da 10000 dinlemiyor: journalctl -u xray"
+fi
+
+log "Xray paneli yerleştiriliyor (v2ray-agent)…"
+VA_SRC="${STACK_DIR}/scripts/v2ray-agent/install.sh"
+if [[ -f "${VA_SRC}" ]]; then
+  install -m 0755 "${VA_SRC}" /usr/local/bin/va
+  ok "Panel hazır: va (baba menüsünde 'Xray Yönetimi'); çalıştırılana kadar sisteme dokunmaz."
+else
+  warn "scripts/v2ray-agent/install.sh bulunamadı; panel kurulmadı."
 fi
 
 log "fail2ban yapılandırılıyor..."
@@ -303,11 +667,14 @@ echo -e "${GREEN}          VPN STACK KURULUMU TAMAMLANDI        ${NC}"
 echo -e "${GREEN}===============================================${NC}"
 echo -e " Sürüm           : ${GREEN}${VERSION}${NC}"
 echo -e " Terminal Menü   : ${GREEN}baba${NC} (veya vpnmenu)"
+echo -e " Xray Paneli     : ${GREEN}va${NC} · ${GREEN}systemctl status xray${NC}"
 echo -e " Sing-box Menü   : ${GREEN}singbox${NC}"
 echo -e " Sağlık Kontrolü : ${GREEN}vpnctl doctor${NC}"
 echo -e " Sunucu IP       : ${GREEN}${SERVER_IP}${NC}"
+echo -e " Domain          : ${GREEN}${DOMAIN:-$(cat /etc/xray/domain 2>/dev/null || echo '-')}${NC} · TLS: ${GREEN}/etc/xray/xray.crt${NC}"
+echo -e " Sertifika       : ${GREEN}${CERT_SOURCE:-mevcut}${NC}"
 echo -e " SSH Portları    : ${GREEN}80${NC} (haproxy) / ${GREEN}10015${NC} (sshproxy)"
 echo -e " SSH Hedefi      : ${GREEN}127.0.0.1:109${NC}"
 echo -e " Sing-box Config : ${GREEN}${SINGBOX_CONFIG}${NC}"
-echo -e " Servisler       : ${GREEN}systemctl status ws ws-ovpn haproxy sing-box${NC}"
+echo -e " Servisler       : ${GREEN}systemctl status ws ws-ovpn haproxy sing-box xray${NC}"
 echo -e "${GREEN}===============================================${NC}"

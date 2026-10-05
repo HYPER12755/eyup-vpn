@@ -1,6 +1,17 @@
 package appconfig
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func isolateMenuConf(t *testing.T) {
+	t.Helper()
+	previous := MenuConfPath
+	MenuConfPath = filepath.Join(t.TempDir(), "menu.conf")
+	t.Cleanup(func() { MenuConfPath = previous })
+}
 
 func TestEnvFallsBackOnBlank(t *testing.T) {
 	t.Setenv("VPNSTACK_TEST_ENV", "   ")
@@ -14,6 +25,7 @@ func TestEnvFallsBackOnBlank(t *testing.T) {
 }
 
 func TestPublicHostFallsBackToDefault(t *testing.T) {
+	isolateMenuConf(t)
 	t.Setenv("SSH_PUBLIC_HOST", "")
 	t.Setenv("FAKE_HOST", "")
 	if got := PublicHost(); got != DefaultPublicHost {
@@ -21,7 +33,20 @@ func TestPublicHostFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestPublicHostFallsBackToMenuConf(t *testing.T) {
+	isolateMenuConf(t)
+	t.Setenv("SSH_PUBLIC_HOST", "")
+	t.Setenv("FAKE_HOST", "")
+	if err := os.WriteFile(MenuConfPath, []byte("FAKE_HOST=menu.example.com\n"), 0o600); err != nil {
+		t.Fatalf("menu.conf yazılamadı: %v", err)
+	}
+	if got := PublicHost(); got != "menu.example.com" {
+		t.Fatalf("PublicHost() = %q, want %q", got, "menu.example.com")
+	}
+}
+
 func TestPublicHostPrefersEnvironment(t *testing.T) {
+	isolateMenuConf(t)
 	t.Setenv("SSH_PUBLIC_HOST", "")
 	t.Setenv("FAKE_HOST", "vpn.example.com")
 	if got := PublicHost(); got != "vpn.example.com" {
