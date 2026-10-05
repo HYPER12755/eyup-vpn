@@ -19,8 +19,44 @@ Sec-WebSocket-Accept: <base64(sha1(key + GUID))>   # "foo" when no key was sent
 
 ## Request headers
 
-All headers are read from the first request, up to the blank line (64 KiB max,
-10 s deadline).
+`sshproxy` reads exactly **one** request, stopping at the first blank line
+(64 KiB max, 10 s deadline). Everything the client sends after that blank line
+is treated as payload and forwarded to the target untouched.
+
+This means the whole WebSocket upgrade must live in the **first** request.
+Sending the handshake in request 1, a probe in request 2, and the real upgrade
+in request 3 does not work:
+
+```http
+GET / HTTP/1.1
+Host: example.com
+
+X / HTTP/1.1
+Host: [host]
+
+GET / HTTP/1.1
+Upgrade: websocket
+Sec-WebSocket-Key: ...
+```
+
+Request 1 has no `Sec-WebSocket-Key`, so framing is disabled and the response
+carries `Sec-WebSocket-Accept: foo`. Requests 2 and 3 are then forwarded to
+the SSH server, which sees `X / HTTP/1.1` as its client banner and aborts. A
+client that later sends a WebSocket frame also breaks, because the raw relay
+copies it without unmasking.
+
+A correct single request looks like this:
+
+```http
+GET / HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: <base64 16 random bytes>
+Sec-WebSocket-Version: 13
+X-Real-Host: 127.0.0.1:109
+
+```
 
 | Header | Effect when present |
 |---|---|
@@ -28,11 +64,26 @@ All headers are read from the first request, up to the blank line (64 KiB max,
 | `X-Split` | Discards one incoming packet before relaying (see below). |
 | `X-Pass` | Shared secret; only checked when the binary is built with a non-empty `pass`. |
 | `Sec-WebSocket-Key` | Selects RFC 6455 framing for the rest of the stream. |
+| `Host` | Ignored. `sshproxy` does not route on domain. |
 
 Header names are matched **case-insensitively** (`x-real-host` and
 `X-ReAl-HoSt` both work), and only against the name field of a line. A header
 name mentioned inside another header's value is ignored, so
 `Referer: http://x/X-Real-Host: 8.8.8.8:53` does **not** set a target.
+
+## Host and domain
+
+No domain is baked in, and none is required. `Host:` is read but unused —
+haproxy routes purely on the request line (`GET`/`CONNECT` → sshproxy,
+anything else → the SSH backend), so **any hostname reaches the bridge**.
+`gnc.dnatech.io`, an IP literal, or `localhost` all behave identically.
+
+The domain that appears in *generated client links* is a separate thing: it
+comes from `appconfig.PublicHost()`, which resolves in this order —
+`SSH_PUBLIC_HOST`, then `FAKE_HOST`, then `FAKE_HOST` in
+`/etc/sshvpn/menu.conf`, then the built-in default `can.vps-mosto.site`. Set
+`SSH_PUBLIC_HOST` to your own domain before running `vpnctl links` so the
+links you hand out point where you want.
 
 ## Target validation
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -165,6 +166,65 @@ func TestHandleConnPreservesPipelinedData(t *testing.T) {
 	reader := bufio.NewReader(client)
 	readSwitch(t, reader)
 	assertEcho(t, reader, payload)
+}
+
+// Only the first request is inspected. A client that spreads its handshake
+// across several pipelined requests gets the extra ones forwarded to the SSH
+// server as payload, which sees them as an invalid banner and drops the
+// connection. Pinning this so the single-request requirement stays documented
+// behaviour rather than a surprise.
+func TestOnlyFirstRequestIsParsed(t *testing.T) {
+	echo := startEchoServer(t)
+	bridge := startBridgeServer(t)
+
+	client, err := net.DialTimeout("tcp", bridge.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+
+	head := fmt.Sprintf("GET / HTTP/1.1\r\nHost: example.com\r\nX-Real-Host: 127.0.0.1:%d\r\n\r\n", echoPort(t, echo))
+	// A second request carrying the upgrade headers, as a misconfigured client
+	// would send it.
+	second := "GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+	if _, err := client.Write([]byte(head + second)); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := bufio.NewReader(client)
+
+	// Consume the 101 status line and header block ourselves so the accept token
+	// can be inspected; readSwitch() discards them.
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "HTTP/1.1 101") {
+		t.Fatalf("unexpected status: %q", status)
+	}
+	var headers []byte
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers = append(headers, line...)
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	// No Sec-WebSocket-Key in the first request, so framing stays off and the
+	// accept token is the placeholder rather than the RFC 6455 digest.
+	if !strings.Contains(string(headers), "Sec-WebSocket-Accept: foo") {
+		t.Fatalf("expected raw relay with placeholder accept token, got %q", headers)
+	}
+	if strings.Contains(string(headers), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") {
+		t.Fatal("framing must not be enabled by a later request")
+	}
+	// The second request is relayed verbatim as payload.
+	assertEcho(t, reader, []byte(second))
 }
 
 func TestHandleConnRejectsBadTarget(t *testing.T) {

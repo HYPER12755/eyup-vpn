@@ -24,12 +24,12 @@ goroutines and shares a `bufio.Reader` between them.
 
 ## Test layout
 
-28 tests, no mocks — `handleConn` is exercised over real loopback sockets
+29 tests, no mocks — `handleConn` is exercised over real loopback sockets
 against a local listener.
 
 | Package | Tests | Covers |
 |---|---|---|
-| `cmd/sshproxy` | 15 | header parsing, target validation, loopback guard, framing detection, pipelined and split requests |
+| `cmd/sshproxy` | 16 | header parsing, target validation, loopback guard, framing detection, pipelined and split requests |
 | `internal/singbox` | 6 | public-key derivation, link building, add/remove user |
 | `internal/appconfig` | 4 | env var fallback, public host resolution |
 | `internal/accounts` | 3 | username validation, random credentials, client payloads |
@@ -49,6 +49,7 @@ against the pre-fix code and are the reason to keep them:
 | `TestFindHeaderIgnoresInjectionInValue` | a target inside a `Referer` value must not be used |
 | `TestIsLocalHost` | `localhost.attacker.example`, `127.0.0.1.evil` rejected; `[::1]` accepted |
 | `TestTargetAddress` | `host:` / `0` / `> 65535` rejected; `[::1]:109` accepted |
+| `TestOnlyFirstRequestIsParsed` | a `Sec-WebSocket-Key` in a *second* request must not enable framing |
 
 To confirm a test still bites, revert the function it covers and watch it fail:
 
