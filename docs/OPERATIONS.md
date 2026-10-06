@@ -34,6 +34,16 @@ To route a new SNI to 443, add this line to the `reality_frontend` section of `/
 - Domain and certificate live in `/etc/xray/domain` and `/etc/xray/xray.crt` + `xray.key`. `install.sh` searches for an existing pair first (`/etc/xray`, `hap.pem`, Let's Encrypt, `~/.acme.sh`, v2ray-agent TLS), reads the domain from `/etc/xray/domain` or the certificate CN, and only then prompts or generates a self-signed pair. `VPNSTACK_DOMAIN`, `VPNSTACK_CERT_PATH`, `VPNSTACK_KEY_PATH` override the search. In the legacy profile the same pair is rebuilt into `/etc/haproxy/hap.pem`.
 - Before replacing anything from an older layout, the installer backs up the legacy SSH bridge to `/etc/sshvpn/legacy/ws.py` and old `ws`/`ws-ovpn` units to `*.vpnstack-backup`, so the previous working system stays recoverable.
 
+## Domains, DuckDNS and Cloudflare
+
+- **SSH without a domain works.** Raw SSH goes to `IP:80` (or 8080/8880/2052/2082/2086/2095) and haproxy hands it to dropbear; WebSocket payloads only put the domain in the `Host` header, which is plain text and needs no DNS. A domain is required for the TLS modes (443/TLS payloads, Cloudflare proxying, certificate validation) — or the client must accept a self-signed certificate.
+- **DuckDNS is fine.** Point a free `name.duckdns.org` A record at the server, then issue a Let's Encrypt certificate with acme.sh's DNS-01 module (`dns_duckdns`, `DuckDNS_Token`), which does not need port 80. Set the domain in `baba` → `[8] İstemci Ayarları` so payloads use it as the host.
+- **Cloudflare (proxied/orange cloud) can carry the WebSocket paths**, not raw SSH or REALITY:
+  - HTTP ports: 80, 8080, 8880, 2052, 2082, 2086, 2095
+  - HTTPS ports: 443, 2053, 2083, 2087, 2096, 8443
+  - For SSH over Cloudflare use the WebSocket/TLS payload (path `/` → Xray fallback → dropbear, or the SSH-WS bridge); raw SSH and REALITY need a DNS-only (grey cloud) record.
+  - The haproxy profiles publish every port in that list, so any Cloudflare-compatible port reaches the same backends.
+
 ## haproxy configuration
 
 `/etc/haproxy/haproxy.cfg` comes from the `deploy/haproxy.cfg` version in the repo. `install.sh` only replaces the existing file if it is **absent** or is the distribution's stock template, so REALITY/SNI lines you added by hand are preserved (if the stock template is replaced, a `.vpnstack-backup` copy is taken first). When an existing custom configuration is kept, `install.sh` still verifies that it routes WebSocket to `127.0.0.1:10015` and raw SSH to `127.0.0.1:143`, and names whatever is missing instead of leaving a silent gap.

@@ -93,7 +93,7 @@ vpnctl restore <file> # restore from a backup (--yes to skip confirmation)
 | 10012 | `sshproxy` (OpenVPN-over-WS, localhost) |
 | 10000-10007 | `xray`: stats API + VLESS/VMess/Trojan WS and gRPC inbounds (localhost, legacy profile) |
 
-With `VPNSTACK_HAPROXY_PROFILE=legacy` the haproxy frontend additionally publishes 8080/8880/2082 (HTTP) and 8443/2096/2087 (TLS).
+With `VPNSTACK_HAPROXY_PROFILE=legacy` the haproxy frontend additionally publishes 8080/8880/2052/2082/2086/2095 (HTTP) and 2053/2083/2087/2096/8443 (TLS) — every port Cloudflare can proxy (see [OPERATIONS.md](docs/OPERATIONS.md#domains-duckdns-and-cloudflare)).
 
 ## Security model
 
