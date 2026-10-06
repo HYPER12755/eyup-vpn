@@ -1,0 +1,12 @@
+[Unit]
+Description=vpnstack kota/süre denetleyicisi (Xray)
+After=network.target xray.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpnlimit
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

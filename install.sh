@@ -188,6 +188,7 @@ go mod download
 CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/sshproxy ./cmd/sshproxy
 CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/sblink ./cmd/sblink
 CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/vpnctl ./cmd/vpnctl
+CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/vpnlimit ./cmd/vpnlimit
 install -m 0755 "${STACK_DIR}/scripts/vpnmenu.sh" /usr/local/bin/vpnmenu
 ln -sf /usr/local/bin/vpnmenu /usr/local/bin/baba
 install -m 0755 "${STACK_DIR}/scripts/xraymenu.sh" /usr/local/bin/xraymenu
@@ -280,9 +281,89 @@ if [[ -n "${DOMAIN}" ]]; then
   ok "Domain kaydedildi: ${DOMAIN} (/etc/xray/domain)"
 fi
 
+# --------------------------------------------------------- DuckDNS (opsiyonel)
+# Token verilirse: DuckDNS A kaydı bu sunucuya yönlendirilir ve DNS-01
+# doğrulamasıyla Let's Encrypt sertifikası alınır (80 portu meşgul edilmez).
+# Boş geçilirse hiçbir şey yapılmaz. acme.sh doğrulanmamış bir boru hattıyla
+# değil, pinlenmiş commit + sha256 ile kurulur.
+ACME_HOME="/root/.acme.sh"
+ACME_BIN="${ACME_HOME}/acme.sh"
+
+ensure_acme() {
+  local commit="807da6498377ee5e0cf43a78091f46f12dc59a89"
+  local acme_sha="c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7"
+  local dnsapi_sha="8be535b8d6270b7a37671da954d89c896df7af29c2f38d5029054ec315fe77af"
+  if [[ -x "${ACME_BIN}" && -f "${ACME_HOME}/dnsapi/dns_duckdns.sh" ]]; then
+    return 0
+  fi
+  mkdir -p "${ACME_HOME}/dnsapi"
+  curl -fsSL "https://raw.githubusercontent.com/acmesh-official/acme.sh/${commit}/acme.sh" -o "${ACME_BIN}" || return 1
+  curl -fsSL "https://raw.githubusercontent.com/acmesh-official/acme.sh/${commit}/dnsapi/dns_duckdns.sh" -o "${ACME_HOME}/dnsapi/dns_duckdns.sh" || return 1
+  verify_sha256 "${ACME_BIN}" "${acme_sha}" "acme.sh" || return 1
+  verify_sha256 "${ACME_HOME}/dnsapi/dns_duckdns.sh" "${dnsapi_sha}" "dns_duckdns.sh" || return 1
+  chmod 0755 "${ACME_BIN}"
+  # Günlük yenileme; --install-cert yolları kaydedildiği için cron yenilemesi
+  # sertifikayı doğrudan /etc/xray'e geri kurar.
+  cat > /etc/cron.d/vpnstack-acme <<EOF
+0 3 * * * root ${ACME_BIN} --cron --home ${ACME_HOME} >/dev/null 2>&1
+EOF
+  return 0
+}
+
+DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-}"
+if [[ -z "${DUCKDNS_TOKEN}" && -t 0 ]]; then
+  read -r -p "DuckDNS tokeni (boş = atla, DNS-01 sertifikası alınmaz): " DUCKDNS_TOKEN || true
+fi
+DUCKDNS_CERT=false
+DUCKDNS_SOURCE=""
+if [[ -n "${DUCKDNS_TOKEN}" ]]; then
+  mkdir -p /etc/xray
+  if [[ -z "${DOMAIN}" && -t 0 ]]; then
+    read -r -p "DuckDNS alt alan adı (örn. adiniz.duckdns.org): " DOMAIN || true
+    if [[ -n "${DOMAIN}" ]]; then
+      printf '%s\n' "${DOMAIN}" > /etc/xray/domain
+      ok "Domain kaydedildi: ${DOMAIN} (/etc/xray/domain)"
+    fi
+  fi
+  if [[ "${DOMAIN}" != *".duckdns.org" ]]; then
+    warn "DuckDNS tokeni verildi ama domain .duckdns.org değil; DuckDNS adımı atlandı."
+  else
+    DUCKDNS_SUB="${DOMAIN%.duckdns.org}"
+    DUCKDNS_IP="$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [[ -n "${DUCKDNS_IP}" ]]; then
+      DUCKDNS_RESULT="$(curl -fsSL --max-time 10 "https://www.duckdns.org/update?domains=${DUCKDNS_SUB}&token=${DUCKDNS_TOKEN}&ip=${DUCKDNS_IP}" 2>/dev/null || true)"
+      if [[ "${DUCKDNS_RESULT}" == "OK" ]]; then
+        ok "DuckDNS A kaydı güncellendi: ${DOMAIN} → ${DUCKDNS_IP}"
+      else
+        warn "DuckDNS A kaydı güncellenemedi (${DUCKDNS_RESULT:-yanıt yok}); mevcut kayıt kullanılacak."
+      fi
+    fi
+    if ensure_acme; then
+      if DuckDNS_Token="${DUCKDNS_TOKEN}" "${ACME_BIN}" --home "${ACME_HOME}" --issue --dns dns_duckdns -d "${DOMAIN}" --keylength ec-256 >/dev/null 2>&1 \
+        && DuckDNS_Token="${DUCKDNS_TOKEN}" "${ACME_BIN}" --home "${ACME_HOME}" --install-cert -d "${DOMAIN}" --ecc \
+             --fullchain-file /etc/xray/xray.crt --key-file /etc/xray/xray.key >/dev/null 2>&1; then
+        chmod 0644 /etc/xray/xray.crt
+        chmod 0600 /etc/xray/xray.key
+        DUCKDNS_CERT=true
+        DUCKDNS_SOURCE="DuckDNS + Let's Encrypt (acme.sh)"
+        ok "DuckDNS sertifikası alındı: ${DOMAIN}"
+      else
+        warn "DuckDNS sertifikası alınamadı (token/alan adı?); mevcut sertifikaya düşülecek."
+      fi
+    else
+      warn "acme.sh indirilemedi/doğrulanamadı; DuckDNS sertifikası atlandı."
+    fi
+  fi
+fi
+
 CERT_PATH="${VPNSTACK_CERT_PATH:-}"
 KEY_PATH="${VPNSTACK_KEY_PATH:-}"
 CERT_SOURCE=""
+if [[ "${DUCKDNS_CERT}" == true && -z "${CERT_PATH}" ]]; then
+  CERT_PATH=/etc/xray/xray.crt
+  KEY_PATH=/etc/xray/xray.key
+  CERT_SOURCE="${DUCKDNS_SOURCE}"
+fi
 if [[ -z "${CERT_PATH}" ]]; then
   CERT_PAIR="$(find_cert_pair || true)"
   if [[ -n "${CERT_PAIR}" ]]; then
@@ -308,7 +389,7 @@ if [[ -n "${CERT_PATH}" ]]; then
     CERT_SOURCE="${CERT_SOURCE:-birleşik PEM}"
     ok "Sertifika ayrıştırıldı: ${CERT_PATH} → /etc/xray/xray.crt + xray.key"
   elif [[ "${CERT_PATH}" == /etc/xray/xray.crt && "${KEY_PATH}" == /etc/xray/xray.key ]]; then
-    ok "Mevcut Xray sertifikası kullanılıyor: /etc/xray/xray.crt"
+    ok "Xray sertifikası hazır: /etc/xray/xray.crt${CERT_SOURCE:+ (${CERT_SOURCE})}"
   else
     [[ -f "${CERT_PATH}" && -f "${KEY_PATH}" ]] || die "Sertifika/anahtar bulunamadı: cert='${CERT_PATH}' key='${KEY_PATH}'"
     install -m 0644 "${CERT_PATH}" /etc/xray/xray.crt
@@ -336,6 +417,39 @@ fi
 # SSH tüneli destek dosyaları: grup ve eski köprünün yedeği.
 getent group sshvpn >/dev/null 2>&1 || groupadd -f sshvpn >/dev/null 2>&1 || true
 ok "sshvpn grubu hazır."
+
+# Eski panelin SSH hesap grubunu sahiplen: sshvpn boşken /bin/false kabuklu
+# kullanıcıların en kalabalık grubu o panelin grubudur; menu.conf'a yazılır ve
+# baba/vpnctl bu grubu yönetir.
+detect_legacy_group() {
+  local gid group count best="" best_count=0
+  while IFS= read -r gid; do
+    [[ -n "${gid}" ]] || continue
+    (( gid >= 1000 )) || continue
+    group="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)"
+    [[ -n "${group}" && "${group}" != "sshvpn" ]] || continue
+    count="$(awk -F: -v g="${gid}" '$4==g && $7=="/bin/false" {c++} END {print c+0}' /etc/passwd)"
+    if (( count > best_count )); then
+      best="${group}"
+      best_count="${count}"
+    fi
+  done < <(awk -F: '$7=="/bin/false" {print $4}' /etc/passwd | sort -u)
+  [[ -n "${best}" ]] && echo "${best}"
+}
+
+if grep -qE '^ACCOUNT_GROUP=.+' /etc/sshvpn/menu.conf 2>/dev/null; then
+  ok "SSH hesap grubu ayarlı: $(grep -E '^ACCOUNT_GROUP=' /etc/sshvpn/menu.conf | cut -d= -f2)"
+else
+  OWN_SSHVPN_USERS="$(awk -F: -v g="$(getent group sshvpn | cut -d: -f3)" '$4==g {c++} END {print c+0}' /etc/passwd)"
+  LEGACY_GROUP=""
+  [[ "${OWN_SSHVPN_USERS}" -eq 0 ]] && LEGACY_GROUP="$(detect_legacy_group || true)"
+  if [[ -n "${LEGACY_GROUP}" ]]; then
+    printf 'ACCOUNT_GROUP=%s\n' "${LEGACY_GROUP}" >> /etc/sshvpn/menu.conf
+    ok "Mevcut panelin SSH grubu sahiplenildi: ${LEGACY_GROUP} (baba/vpnctl artık bunu yönetir)."
+  else
+    ok "SSH hesap grubu: sshvpn"
+  fi
+fi
 for legacy in /etc/whoiamluna/ws.py /usr/local/bin/ws.py /root/ws.py /etc/ws.py; do
   if [[ -f "${legacy}" ]]; then
     mkdir -p /etc/sshvpn/legacy
@@ -709,6 +823,25 @@ else
   warn "scripts/v2ray-agent/install.sh bulunamadı; panel kurulmadı."
 fi
 
+log "Kota/süre denetleyicisi kuruluyor…"
+# Eski panelin limit* daemon'ları aynı sayaçları okuyup aynı dosyalara yazar;
+# ikisi birlikte çalışırsa kullanım çift sayılır. vpnlimit devralır.
+for legacy_unit in limitvless limitvmess limittrojan limitshadowsocks; do
+  if systemctl is-enabled "${legacy_unit}" >/dev/null 2>&1 || systemctl is-active --quiet "${legacy_unit}" 2>/dev/null; then
+    systemctl disable --now "${legacy_unit}" >/dev/null 2>&1 || true
+    log "Eski ${legacy_unit} daemon'u kapatıldı (vpnlimit devraldı)."
+  fi
+done
+install -m 0644 "${STACK_DIR}/deploy/vpnlimit.service" /etc/systemd/system/vpnlimit.service
+systemctl daemon-reload
+systemctl enable vpnlimit >/dev/null 2>&1 || true
+systemctl restart vpnlimit >/dev/null 2>&1 || true
+if systemctl is-active --quiet vpnlimit; then
+  ok "vpnlimit çalışıyor (Xray kotaları ve süresi her turda denetlenir)."
+else
+  warn "vpnlimit başlatılamadı: journalctl -u vpnlimit"
+fi
+
 log "fail2ban yapılandırılıyor..."
 JAILS=""
 if [[ -f /etc/fail2ban/filter.d/dropbear.conf ]]; then
@@ -743,6 +876,7 @@ echo -e "${GREEN}===============================================${NC}"
 echo -e " Sürüm           : ${GREEN}${VERSION}${NC}"
 echo -e " Terminal Menü   : ${GREEN}baba${NC} (veya vpnmenu)"
 echo -e " Xray Menü       : ${GREEN}baba [6]${NC} · ${GREEN}xraymenu${NC} · panel: ${GREEN}va${NC}"
+echo -e " Kota Denetimi   : ${GREEN}vpnlimit${NC} (kota + süre)"
 echo -e " Sing-box Menü   : ${GREEN}singbox${NC}"
 echo -e " Sağlık Kontrolü : ${GREEN}vpnctl doctor${NC}"
 echo -e " Sunucu IP       : ${GREEN}${SERVER_IP}${NC}"
