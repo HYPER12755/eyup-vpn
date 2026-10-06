@@ -12,7 +12,8 @@ A lightweight VPN management stack written in Go, consisting of an SSH WebSocket
 | `sblink` | Derives the REALITY public key (`tag=pbk`) | `/usr/local/bin/sblink` |
 | `vpnctl` | Health check, status, links, backup/restore | `/usr/local/bin/vpnctl` |
 | `xray` | Multi-protocol core (VLESS/VMess/Trojan WS+gRPC) used by the legacy profile | `/usr/local/bin/xray` |
-| `va` | Vendored Xray terminal panel ([mack-a/v2ray-agent](scripts/v2ray-agent/UPSTREAM.md)) | `/usr/local/bin/va` |
+| `xraymenu` | Turkish Xray menu: add/list/delete users, links, config test | `/usr/local/bin/xraymenu` |
+| `va` | Vendored upstream panel ([mack-a/v2ray-agent](scripts/v2ray-agent/UPSTREAM.md), Chinese UI) | `/usr/local/bin/va` |
 | `haproxy` | 80: WS/SSH frontend · 443: SNI passthrough (REALITY) | system |
 | `dropbear`/`sshd` | SSH authentication | system |
 
@@ -63,7 +64,8 @@ vendor the script, rather than letting an unverified script run as root.
 
 ```bash
 baba                  # terminal menu (SSH accounts + client settings)
-va                    # Xray management panel (vendored v2ray-agent)
+xraymenu              # Turkish Xray menu (users, links, config test); baba → [6]
+va                    # advanced upstream panel (v2ray-agent, Chinese; optional)
 singbox               # sing-box node/user management
 vpnctl status         # overall status
 vpnctl doctor         # health check (exit code 1 if anything is wrong)

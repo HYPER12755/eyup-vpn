@@ -74,6 +74,9 @@ cmd/vpnctl/ops.go        status/doctor/links/users, backup, restore
 internal/singbox/        config load/save, REALITY keys, link building
 internal/accounts/       SSH user creation and client payloads
 internal/appconfig/      paths and env var resolution
+scripts/vpnmenu.sh        baba terminal menu (SSH accounts, services)
+scripts/xraymenu.sh       Turkish Xray menu (delegates edits to xraycfg)
+scripts/xraycfg.py        marker-based Xray config editor + link builder
 scripts/v2ray-agent/     vendored Xray panel (UPSTREAM.md pins commit + sha256)
 ```
 

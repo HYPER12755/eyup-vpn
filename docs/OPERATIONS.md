@@ -30,7 +30,7 @@ To route a new SNI to 443, add this line to the `reality_frontend` section of `/
 ## Xray (legacy profile)
 
 - `/etc/xray/config.json` is marker-based: `#& <user> <expiry>` lines mark user entries, and `#vless` / `#vmess` / `#trojanws` / `#vlessgrpc` / ... are the insertion markers the manager writes to.
-- The vendored panel is `va` (or `baba` → `[6] Xray Yönetimi`). It is upstream's script (see `scripts/v2ray-agent/UPSTREAM.md`) and manages its own Xray/nginx/TLS layout; running it can change haproxy, sing-box and sshproxy behaviour, so take a backup first (`vpnctl backup`).
+- Manage users with the Turkish menu: `xraymenu` (also `baba` → `[6] Xray Yönetimi`). It adds/removes users on the marker lines, validates every change with `xray run -test` (reverting on failure), rebuilds links and restarts the service. The vendored upstream panel `va` (mack-a/v2ray-agent, Chinese UI) is reachable from the same menu for advanced work; it manages its own Xray/nginx/TLS layout and running it can change haproxy, sing-box and sshproxy behaviour, so take a backup first (`vpnctl backup`).
 - Domain and certificate live in `/etc/xray/domain` and `/etc/xray/xray.crt` + `xray.key`. `install.sh` searches for an existing pair first (`/etc/xray`, `hap.pem`, Let's Encrypt, `~/.acme.sh`, v2ray-agent TLS), reads the domain from `/etc/xray/domain` or the certificate CN, and only then prompts or generates a self-signed pair. `VPNSTACK_DOMAIN`, `VPNSTACK_CERT_PATH`, `VPNSTACK_KEY_PATH` override the search. In the legacy profile the same pair is rebuilt into `/etc/haproxy/hap.pem`.
 - Before replacing anything from an older layout, the installer backs up the legacy SSH bridge to `/etc/sshvpn/legacy/ws.py` and old `ws`/`ws-ovpn` units to `*.vpnstack-backup`, so the previous working system stays recoverable.
 
@@ -61,6 +61,8 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy
 - Otherwise the `dropbear` package is installed (apt is retried) and run as the `dropbear-vpnstack` unit on those two loopback ports. If it cannot be installed, the install **fails** instead of leaving raw SSH silently dead; `VPNSTACK_SKIP_DROPBEAR=1` overrides that deliberately.
 
 The WebSocket path (10015/80) needs dropbear only when the payload's target is the default `127.0.0.1:109`; raw SSH on port 80 always does.
+
+SSH tunnel accounts live in the `sshvpn` group by default. On servers where an older script created them under another group, run the menus with `SSH_ACCOUNT_GROUP=<group> baba` (or export it) so listing, creation and deletion target the existing accounts — both the group member list and users whose primary group is that group are recognised.
 
 ## Troubleshooting
 
