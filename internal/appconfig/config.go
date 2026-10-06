@@ -60,6 +60,36 @@ func MenuConfValues() (string, string) {
 	return host, header
 }
 
+// MenuConfMap returns every key/value pair of the client-settings file.
+func MenuConfMap() map[string]string {
+	values := map[string]string{}
+	data, err := os.ReadFile(MenuConfPath)
+	if err != nil {
+		return values
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+// AccountGroup is the group baba/vpnctl manage: SSH_ACCOUNT_GROUP wins, then
+// menu.conf's ACCOUNT_GROUP (install.sh writes it when it adopts the group of
+// an already-installed panel), then the project default.
+func AccountGroup() string {
+	if value := Env("SSH_ACCOUNT_GROUP", ""); value != "" {
+		return value
+	}
+	if value := MenuConfMap()["ACCOUNT_GROUP"]; value != "" {
+		return value
+	}
+	return DefaultSSHGroup
+}
+
 func PublicHost() string {
 	menuHost, _ := MenuConfValues()
 	if host := Env("SSH_PUBLIC_HOST", Env("FAKE_HOST", menuHost)); host != "" {

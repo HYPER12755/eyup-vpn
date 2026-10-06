@@ -14,6 +14,7 @@ A lightweight VPN management stack written in Go, consisting of an SSH WebSocket
 | `xray` | Multi-protocol core (VLESS/VMess/Trojan WS+gRPC) used by the legacy profile | `/usr/local/bin/xray` |
 | `xraymenu` | Turkish Xray menu: add/list/delete users, links, config test | `/usr/local/bin/xraymenu` |
 | `va` | Vendored upstream panel ([mack-a/v2ray-agent](scripts/v2ray-agent/UPSTREAM.md), Chinese UI) | `/usr/local/bin/va` |
+| `vpnlimit` | Ported legacy quota/expiry enforcer (usage, quota, expiry, Telegram) | `/usr/local/bin/vpnlimit` |
 | `haproxy` | 80: WS/SSH frontend · 443: SNI passthrough (REALITY) | system |
 | `dropbear`/`sshd` | SSH authentication | system |
 

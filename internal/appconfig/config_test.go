@@ -58,6 +58,24 @@ func TestPublicHostPrefersEnvironment(t *testing.T) {
 	}
 }
 
+func TestAccountGroupPrecedence(t *testing.T) {
+	isolateMenuConf(t)
+	t.Setenv("SSH_ACCOUNT_GROUP", "")
+	if got := AccountGroup(); got != DefaultSSHGroup {
+		t.Fatalf("AccountGroup() = %q, want %q", got, DefaultSSHGroup)
+	}
+	if err := os.WriteFile(MenuConfPath, []byte("FAKE_HOST=x\nACCOUNT_GROUP=legacygroup\n"), 0o600); err != nil {
+		t.Fatalf("menu.conf yazılamadı: %v", err)
+	}
+	if got := AccountGroup(); got != "legacygroup" {
+		t.Fatalf("AccountGroup() = %q, want %q", got, "legacygroup")
+	}
+	t.Setenv("SSH_ACCOUNT_GROUP", "envgroup")
+	if got := AccountGroup(); got != "envgroup" {
+		t.Fatalf("AccountGroup() = %q, want %q", got, "envgroup")
+	}
+}
+
 func TestEnvInt(t *testing.T) {
 	t.Setenv("VPNSTACK_TEST_INT", "")
 	if got := EnvInt("VPNSTACK_TEST_INT", 10015); got != 10015 {

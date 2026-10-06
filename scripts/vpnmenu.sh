@@ -79,7 +79,13 @@ load_menu_conf() {
 
 save_menu_conf() {
   mkdir -p "$(dirname "${MENU_CONF}")"
-  printf 'FAKE_HOST=%s\nEXTRA_HEADER=%s\n' "${FAKE_HOST}" "${EXTRA_HEADER}" > "${MENU_CONF}"
+  # ACCOUNT_GROUP eski panelin grup ayarıdır; kaydederken kaybetme.
+  local account_group
+  account_group="$(menu_conf_value ACCOUNT_GROUP)"
+  {
+    printf 'FAKE_HOST=%s\nEXTRA_HEADER=%s\n' "${FAKE_HOST}" "${EXTRA_HEADER}"
+    [[ -n "${account_group}" ]] && printf 'ACCOUNT_GROUP=%s\n' "${account_group}"
+  } > "${MENU_CONF}"
   chmod 600 "${MENU_CONF}"
 }
 
@@ -107,12 +113,46 @@ server_domain() {
   echo "${domain}"
 }
 
-load_domain_from_menu_conf() {
-  local key value
+menu_conf_value() {
+  local want="$1" key value
   [[ -f "${MENU_CONF}" ]] || return
   while IFS='=' read -r key value; do
-    [[ "${key}" == "FAKE_HOST" && -n "${value}" ]] && echo "${value}"
+    if [[ "${key}" == "${want}" && -n "${value}" ]]; then
+      echo "${value}"
+      return
+    fi
   done < "${MENU_CONF}"
+}
+
+load_domain_from_menu_conf() {
+  menu_conf_value FAKE_HOST
+}
+
+# Eski panelin SSH hesap veritabanı: "#ssh# kullanıcı şifre kota  GG Ay, YYYY"
+SSH_DB_FILE="/etc/ssh/.ssh.db"
+
+ssh_db_lookup() { # ssh_db_lookup <user> -> "şifre<TAB>bitiş" (yoksa boş döner)
+  local user="$1" line
+  [[ -f "${SSH_DB_FILE}" ]] || return 1
+  line="$(grep -E "^#ssh# ${user} " "${SSH_DB_FILE}" 2>/dev/null | head -n1)"
+  [[ -n "${line}" ]] || return 1
+  local pass expiry
+  pass="$(awk '{print $3}' <<< "${line}")"
+  expiry="$(grep -oE '[0-9]{2} [A-Za-z]{3}, [0-9]{4}$|-+$' <<< "${line}" | head -n1)"
+  printf '%s\t%s' "${pass}" "${expiry}"
+}
+
+ssh_db_upsert() { # ssh_db_upsert <user> <pass> <kota> <bitiş|->
+  local user="$1" pass="$2" quota="$3" expiry="$4"
+  [[ -f "${SSH_DB_FILE}" ]] || return 0
+  sed -i "/^#ssh# ${user} /d" "${SSH_DB_FILE}"
+  printf '#ssh# %s %s %s  %s\n' "${user}" "${pass}" "${quota:-0}" "${expiry:--}" >> "${SSH_DB_FILE}"
+}
+
+ssh_db_remove() { # ssh_db_remove <user>
+  local user="$1"
+  [[ -f "${SSH_DB_FILE}" ]] || return 0
+  sed -i "/^#ssh# ${user} /d" "${SSH_DB_FILE}"
 }
 
 status_line() {
@@ -215,10 +255,14 @@ create_account() {
   ensure_group
   load_menu_conf
 
-  local days username password expiry host_input header_input
+  local days username password expiry host_input header_input quota
   read -r -p "$(echo -e "${CYAN}Süre (gün, varsayılan 30, 0 = süresiz):${NC} ")" days
   days="${days:-30}"
   [[ "${days}" =~ ^[0-9]+$ ]] || days=30
+
+  read -r -p "$(echo -e "${CYAN}Kota GB (varsayılan 0 = sınırsız):${NC} ")" quota
+  quota="${quota:-0}"
+  [[ "${quota}" =~ ^[0-9]+$ ]] || quota=0
 
   read -r -p "$(echo -e "${CYAN}SSH Host / alan adı (varsayılan: ${FAKE_HOST:-${DEFAULT_HOST}}):${NC} ")" host_input
   [[ -n "${host_input}" ]] && FAKE_HOST="${host_input}"
@@ -253,6 +297,12 @@ create_account() {
     return 1
   fi
 
+  # Eski panel kuruluysa hesabı onun veritabanına da yaz; iki menü aynı
+  # hesapları görsün (birebir aynı biçim: #ssh# kullanıcı şifre kota  tarih).
+  local db_expiry="-"
+  [[ "${expiry}" != "-1" ]] && db_expiry="$(date -d "${expiry}" '+%d %b, %Y')"
+  ssh_db_upsert "${username}" "${password}" "${quota}" "${db_expiry}"
+
   local host expires_text
   host="$(client_host)"
   expires_text="Süresiz"
@@ -267,6 +317,8 @@ create_account() {
   echo -e " Kullanıcı   : ${GREEN}${username}${NC}"
   echo -e " Şifre       : ${GREEN}${password}${NC}"
   echo -e " Bitiş       : ${GREEN}${expires_text}${NC}"
+  echo -e " Kota        : ${GREEN}$([[ "${quota}" == "0" ]] && echo sınırsız || echo "${quota} GB")${NC}"
+  [[ -f "${SSH_DB_FILE}" ]] && echo -e " Panel DB    : ${GREEN}${SSH_DB_FILE}${NC} güncellendi"
   [[ -n "${EXTRA_HEADER}" ]] && echo -e " Ek Header   : ${GREEN}${EXTRA_HEADER}${NC}"
   echo -e "${CYAN}----------------------------------------------${NC}"
   echo -e "${YELLOW}Payload 1 (GET):${NC}"
@@ -310,23 +362,39 @@ group_members() {
 }
 
 list_accounts() {
-  local members
+  local members db_users
   members="$(group_members "${GROUP}")"
-  if [[ -z "${members}" ]]; then
+  db_users=""
+  if [[ -f "${SSH_DB_FILE}" ]]; then
+    db_users="$(grep -E '^#ssh# ' "${SSH_DB_FILE}" 2>/dev/null | awk '{print $2}' | sort -u)"
+  fi
+  if [[ -z "${members}" && -z "${db_users}" ]]; then
     echo -e "${YELLOW}Henüz SSH hesabı yok.${NC}"
     return
   fi
 
   echo
-  printf "${BOLD}%-12s %-12s %-10s %s${NC}\n" "KULLANICI" "DURUM" "ŞİFRE" "BİTİŞ"
+  printf "${BOLD}%-12s %-12s %-16s %s${NC}\n" "KULLANICI" "DURUM" "ŞİFRE" "BİTİŞ"
   echo "------------------------------------------------------------"
-  local user status
+  local user status db db_pass db_expiry
   while read -r user; do
     [[ -n "${user}" ]] || continue
     status="$(passwd -S "${user}" 2>/dev/null | awk '{print $2}')"
     [[ "${status}" == "P" ]] && status="aktif" || status="kilitli"
-    printf "%-12s %-12s %-10s %s\n" "${user}" "${status}" "***" "$(account_expiry "${user}")"
+    db_pass="***"; db_expiry=""
+    if db="$(ssh_db_lookup "${user}" 2>/dev/null)"; then
+      db_pass="$(cut -f1 <<< "${db}")"
+      db_expiry="$(cut -f2 <<< "${db}")"
+    fi
+    printf "%-12s %-12s %-16s %s\n" "${user}" "${status}" "${db_pass}" "${db_expiry:-$(account_expiry "${user}")}"
   done <<< "${members}"
+  # Panel veritabanında olup Linux tarafında karşılığı olmayan kayıtlar.
+  while read -r user; do
+    [[ -n "${user}" ]] || continue
+    grep -qx "${user}" <<< "${members}" && continue
+    db="$(ssh_db_lookup "${user}" 2>/dev/null)" || continue
+    printf "%-12s %-12s %-16s %s\n" "${user}" "kayıtsız" "$(cut -f1 <<< "${db}")" "$(cut -f2 <<< "${db}")"
+  done <<< "${db_users}"
   echo
 }
 
@@ -355,7 +423,12 @@ delete_account() {
   local answer
   read -r -p "$(echo -e "${YELLOW}${username} silinsin mi? (e/H):${NC} ")" answer
   if [[ "${answer}" =~ ^[eEyY]$ ]]; then
-    userdel "${username}" 2>/dev/null && echo -e "${GREEN}${username} silindi.${NC}" || echo -e "${RED}Silinemedi.${NC}"
+    if userdel "${username}" 2>/dev/null; then
+      ssh_db_remove "${username}"
+      echo -e "${GREEN}${username} silindi.${NC}"
+    else
+      echo -e "${RED}Silinemedi.${NC}"
+    fi
   fi
 }
 
@@ -651,6 +724,13 @@ menu() {
   box_line "[0] Çıkış"
   box_bottom
 }
+
+# Eski panel kurulumlarında hesap grubu menu.conf'ta saklanır (install.sh
+# mevcut paneli algılayınca yazar); env değişkeni her zaman önceliklidir.
+if [[ -z "${SSH_ACCOUNT_GROUP:-}" ]]; then
+  conf_group="$(menu_conf_value ACCOUNT_GROUP)"
+  [[ -n "${conf_group}" ]] && GROUP="${conf_group}"
+fi
 
 while true; do
   print_banner

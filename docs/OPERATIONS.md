@@ -44,6 +44,14 @@ To route a new SNI to 443, add this line to the `reality_frontend` section of `/
   - For SSH over Cloudflare use the WebSocket/TLS payload (path `/` → Xray fallback → dropbear, or the SSH-WS bridge); raw SSH and REALITY need a DNS-only (grey cloud) record.
   - The haproxy profiles publish every port in that list, so any Cloudflare-compatible port reaches the same backends.
 
+## Quotas and expiry
+
+- Quota per user: write the byte limit to `/etc/<proto>/<user>` (e.g. `printf '%s\n' $((5*1024*1024*1024)) > /etc/vless/ali` for 5 GB). An empty or missing file, or `0`, means unlimited.
+- Usage is accumulated in `/etc/limit/<proto>/<user>` by `vpnlimit`, which reads the Xray stats API every 5 s and resets the counter after recording it.
+- Expiry comes from the config marker date (`#& ali 2026-11-01`). `vpnlimit` removes an account when the quota is exceeded or the date has passed: config pairs, DB line, legacy bookkeeping files, an optional Telegram notice (`/etc/bot/.bot.db`, line `#bot# <key> <chat>`) and one Xray restart.
+- Manual checks: `vpnlimit --once --dry-run` (report only, never touches counters) and `vpnlimit --once` (single enforcing pass). The unit is `vpnlimit.service`.
+- SSH accounts: `baba` reads and writes the legacy panel database `/etc/ssh/.ssh.db` (`#ssh# user pass quota  expiry`), so the old panel and our menu show the same accounts. The managed group resolves as `SSH_ACCOUNT_GROUP` → `ACCOUNT_GROUP` in `menu.conf` (written by `install.sh` when it adopts a legacy group) → `sshvpn`.
+
 ## haproxy configuration
 
 `/etc/haproxy/haproxy.cfg` comes from the `deploy/haproxy.cfg` version in the repo. `install.sh` only replaces the existing file if it is **absent** or is the distribution's stock template, so REALITY/SNI lines you added by hand are preserved (if the stock template is replaced, a `.vpnstack-backup` copy is taken first). When an existing custom configuration is kept, `install.sh` still verifies that it routes WebSocket to `127.0.0.1:10015` and raw SSH to `127.0.0.1:143`, and names whatever is missing instead of leaving a silent gap.
@@ -74,7 +82,7 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy
 
 The WebSocket path (10015/80) needs dropbear only when the payload's target is the default `127.0.0.1:109`; raw SSH on port 80 always does.
 
-SSH tunnel accounts live in the `sshvpn` group by default. On servers where an older script created them under another group, run the menus with `SSH_ACCOUNT_GROUP=<group> baba` (or export it) so listing, creation and deletion target the existing accounts — both the group member list and users whose primary group is that group are recognised.
+SSH tunnel accounts live in the `sshvpn` group by default. If an older panel created them under another group, `install.sh` detects that group and stores it as `ACCOUNT_GROUP` in `/etc/sshvpn/menu.conf`, so `baba` and `vpnctl` manage the existing accounts automatically; `SSH_ACCOUNT_GROUP=<group>` still overrides. Both the group member list and users whose primary group is that group are recognised.
 
 ## Troubleshooting
 

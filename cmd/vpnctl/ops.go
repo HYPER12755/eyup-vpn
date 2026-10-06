@@ -100,7 +100,7 @@ func cmdStatus() int {
 			userCount += len(singbox.Users(inbound))
 		}
 	}
-	group := appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)
+	group := appconfig.AccountGroup()
 	sshUsers, sshErr := accounts.ListUsers(group)
 
 	fmt.Printf("vpnstack %s\n", version.Full())
@@ -251,8 +251,8 @@ func cmdDoctor() int {
 			}
 			return true, fmt.Sprintf("%d anahtar", len(keys))
 		}),
-		runCheck("sshvpn grubu", func() (bool, string) {
-			users, err := accounts.ListUsers(appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup))
+		runCheck("ssh hesap grubu", func() (bool, string) {
+			users, err := accounts.ListUsers(appconfig.AccountGroup())
 			if err != nil {
 				return false, err.Error()
 			}
@@ -307,7 +307,7 @@ func cmdLinks(args []string) int {
 }
 
 func cmdUsers() int {
-	group := appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)
+	group := appconfig.AccountGroup()
 	sshUsers, sshErr := accounts.ListUsers(group)
 	sort.Strings(sshUsers)
 	if sshErr != nil {
@@ -367,7 +367,7 @@ func cmdBackup(args []string) int {
 		}
 	}
 
-	if users, err := accounts.ListUsers(appconfig.Env("SSH_ACCOUNT_GROUP", appconfig.DefaultSSHGroup)); err != nil {
+	if users, err := accounts.ListUsers(appconfig.AccountGroup()); err != nil {
 		fmt.Printf("uyarı: SSH kullanıcı listesi alınamadı: %v\n", err)
 	} else {
 		content := strings.Join(users, "\n") + "\n"

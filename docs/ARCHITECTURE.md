@@ -22,6 +22,7 @@ Client ──(443, TLS ClientHello)──► haproxy reality_frontend (SNI passt
 - **SSH backend:** dropbear listens on `127.0.0.1:109` and `127.0.0.1:143`. `install.sh` adopts a dropbear that already holds both ports and otherwise installs one under the `dropbear-vpnstack` unit. haproxy sends raw SSH to 143; `sshproxy` defaults to 109. `openssh-server` stays on `:22` as a rescue path — **keep an active session open while changing SSH config**.
 - **sing-box:** `/usr/local/etc/sing-box/config.json`; nodes listen on `127.0.0.1` only. Each REALITY node's `handshake.server` field is its own SNI. The `sing-box` binary is expected at `/usr/local/bin/sing-box` (if it lives elsewhere, `/usr/bin/sing-box` is symlinked).
 - **xray:** the multi-protocol core of the legacy profile. Config `/etc/xray/config.json` is marker-based (users sit between `#& user` lines, each protocol has an insertion marker), binary `/usr/local/bin/xray`, unit `xray.service`. Inbounds bind `127.0.0.1` only: `10000` (stats API), `10001-10003` (VLESS/VMess/Trojan WebSocket), `10005-10007` (gRPC); the legacy haproxy frontend publishes them. `install.sh` adopts a running Xray and only installs a pinned release when none exists. Management is via the vendored `va` panel, which the installer places on disk but never runs. Domain/TLS live in `/etc/xray/domain` and `/etc/xray/xray.crt|key`; the legacy haproxy profile consumes the same pair as `/etc/haproxy/hap.pem`.
+- **vpnlimit:** Go port of the legacy `limit.vless/vmess/trojan` daemons. Every 5 s it reads each user's downlink counter through the Xray stats API, accumulates it in `/etc/limit/<proto>/<user>`, and removes accounts whose quota (`/etc/<proto>/<user>`, bytes, 0/unset = unlimited) or expiry (marker date) is reached: config pair removal, DB line removal, legacy file cleanup, optional Telegram notice (`/etc/bot/.bot.db`) and one Xray restart per pass. Installing it disables the legacy `limit*` units so counters are not read twice.
 - **Linux accounts:** in the `sshvpn` group, shell `/bin/false`, expiry set with `chage`. The `baba` menu generates random usernames/passwords.
 
 The client side of this path — request headers, the loopback-only target rule,
@@ -36,6 +37,7 @@ and how framing is chosen — is in [PROTOCOL.md](PROTOCOL.md).
 | `dropbear-vpnstack.service` | `dropbear -F -R -p 127.0.0.1:109 -p 127.0.0.1:143` | — (skipped when an existing dropbear is adopted) |
 | `sing-box.service` | managed by the sing-box manager | — |
 | `xray.service` | `/usr/local/bin/xray run -config /etc/xray/config.json` | — (adopted when already running) |
+| `vpnlimit.service` | `/usr/local/bin/vpnlimit` | — (replaces the legacy `limit*` units) |
 | `haproxy.service` | 80/443 frontend | — |
 | `fail2ban.service` | sshd (+dropbear) jails | — |
 

@@ -73,7 +73,9 @@ cmd/sshproxy/ws.go       RFC 6455 framing, ping/pong, close
 cmd/vpnctl/ops.go        status/doctor/links/users, backup, restore
 internal/singbox/        config load/save, REALITY keys, link building
 internal/accounts/       SSH user creation and client payloads
+internal/limit/          legacy limit.* port: quota/expiry parsing and decisions
 internal/appconfig/      paths and env var resolution
+cmd/vpnlimit/main.go     quota/expiry enforcer daemon (stats API, Telegram, removal)
 scripts/vpnmenu.sh        baba terminal menu (SSH accounts, services)
 scripts/xraymenu.sh       Turkish Xray menu (delegates edits to xraycfg)
 scripts/xraycfg.py        marker-based Xray config editor + link builder
