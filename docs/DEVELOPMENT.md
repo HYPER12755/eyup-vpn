@@ -24,15 +24,17 @@ goroutines and shares a `bufio.Reader` between them.
 
 ## Test layout
 
-30 tests, no mocks — `handleConn` is exercised over real loopback sockets
+50 tests, no mocks — `handleConn` is exercised over real loopback sockets
 against a local listener.
 
 | Package | Tests | Covers |
 |---|---|---|
-| `cmd/sshproxy` | 16 | header parsing, target validation, loopback guard, framing detection, pipelined and split requests |
-| `internal/singbox` | 6 | public-key derivation, link building, add/remove user |
-| `internal/appconfig` | 5 | env var fallback, public host resolution, menu.conf precedence (path injectable) |
+| `cmd/sshproxy` | 19 | header parsing, target validation, loopback guard, framing detection, pipelined and split requests, frame length encodings, close-frame echo, connection limiter |
+| `cmd/vpnlimit` | 3 | usage/quota file helpers |
+| `internal/singbox` | 10 | public-key derivation, link building (vless/vmess/trojan/tuic/hysteria2), add/remove user |
+| `internal/appconfig` | 6 | env var fallback, public host resolution, menu.conf precedence (path injectable) |
 | `internal/accounts` | 3 | username validation, random credentials, client payloads |
+| `internal/limit` | 9 | marker parsing, removal, stats value parsing, quota/expiry decisions |
 
 Note: `internal/singbox`'s tests stub `Validate`, so they do not exercise the
 real `sing-box check` path. That needs the binary present at

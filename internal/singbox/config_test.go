@@ -1,6 +1,7 @@
 package singbox
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/url"
 	"os"
@@ -180,4 +181,113 @@ func parseConfig(t *testing.T, raw string) map[string]any {
 		t.Fatal(err)
 	}
 	return config
+}
+
+func TestBuildLinkTrojan(t *testing.T) {
+	const raw = `{
+	  "inbounds": [{
+	    "type": "trojan", "tag": "tr-node", "listen": "127.0.0.1", "listen_port": 1444,
+	    "users": [{"name": "u1", "password": "s3cret-pass"}],
+	    "tls": {"enabled": true, "server_name": "tr.example.com"}
+	  }], "outbounds": [], "route": {"final": "direct"}
+	}`
+	config := parseConfig(t, raw)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("link is not parseable: %v", err)
+	}
+	if parsed.Scheme != "trojan" {
+		t.Fatalf("scheme = %q, want trojan", parsed.Scheme)
+	}
+	if parsed.User == nil || parsed.User.Username() != "s3cret-pass" {
+		t.Fatalf("trojan password not in userinfo: %v", parsed.User)
+	}
+	if got := parsed.Query().Get("sni"); got != "tr.example.com" {
+		t.Errorf("sni = %q, want tr.example.com", got)
+	}
+	if parsed.Port() != "1444" {
+		t.Errorf("port = %q, want 1444", parsed.Port())
+	}
+}
+
+func TestBuildLinkVMess(t *testing.T) {
+	const raw = `{
+	  "inbounds": [{
+	    "type": "vmess", "tag": "vm-node", "listen": "127.0.0.1", "listen_port": 10002,
+	    "users": [{"name": "u1", "uuid": "11111111-1111-1111-1111-111111111111"}],
+	    "transport": {"type": "ws", "path": "/ws"},
+	    "tls": {"enabled": true, "server_name": "vm.example.com"}
+	  }], "outbounds": [], "route": {"final": "direct"}
+	}`
+	config := parseConfig(t, raw)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	if !strings.HasPrefix(link, "vmess://") {
+		t.Fatalf("link must be vmess://, got %q", link)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(link, "vmess://"))
+	if err != nil {
+		t.Fatalf("vmess payload not base64: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("vmess payload not JSON: %v", err)
+	}
+	if payload["id"] != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("id = %v", payload["id"])
+	}
+	if payload["net"] != "ws" || payload["path"] != "/ws" {
+		t.Errorf("transport not preserved: %v", payload)
+	}
+	if payload["tls"] != "tls" || payload["sni"] != "vm.example.com" {
+		t.Errorf("tls not preserved: %v", payload)
+	}
+}
+
+func TestBuildLinkHysteria2(t *testing.T) {
+	const raw = `{
+	  "inbounds": [{
+	    "type": "hysteria2", "tag": "hy-node", "listen": "127.0.0.1", "listen_port": 1445,
+	    "users": [{"name": "u1", "password": "hy-pass"}],
+	    "tls": {"enabled": true, "server_name": "hy.example.com"}
+	  }], "outbounds": [], "route": {"final": "direct"}
+	}`
+	config := parseConfig(t, raw)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	if !strings.HasPrefix(link, "hysteria2://hy-pass@") {
+		t.Fatalf("unexpected hysteria2 link: %q", link)
+	}
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("link is not parseable: %v", err)
+	}
+	if got := parsed.Query().Get("sni"); got != "hy.example.com" {
+		t.Errorf("sni = %q, want hy.example.com", got)
+	}
+}
+
+func TestBuildLinkTuic(t *testing.T) {
+	const raw = `{
+	  "inbounds": [{
+	    "type": "tuic", "tag": "tuic-node", "listen": "127.0.0.1", "listen_port": 1446,
+	    "users": [{"name": "u1", "uuid": "22222222-2222-2222-2222-222222222222", "password": "tuic-pass"}],
+	    "tls": {"enabled": true, "server_name": "tuic.example.com"}
+	  }], "outbounds": [], "route": {"final": "direct"}
+	}`
+	config := parseConfig(t, raw)
+	inbound := Inbounds(config)[0]
+	link := BuildLink(inbound, Users(inbound)[0])
+
+	if !strings.HasPrefix(link, "tuic://22222222-2222-2222-2222-222222222222:tuic-pass@") {
+		t.Fatalf("unexpected tuic link: %q", link)
+	}
+	if !strings.Contains(link, "sni=tuic.example.com") {
+		t.Errorf("sni missing: %q", link)
+	}
 }

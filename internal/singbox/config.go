@@ -72,6 +72,9 @@ func Save(config map[string]any) error {
 	}
 
 	dir := filepath.Dir(ConfigFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".singbox-*.tmp")
 	if err != nil {
 		return err
@@ -85,7 +88,17 @@ func Save(config map[string]any) error {
 		discard()
 		return err
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(ConfigFile); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		discard()
+		return err
+	}
+	// Sync before rename so a crash cannot leave a truncated config that the
+	// next start would refuse to load.
+	if err := tmp.Sync(); err != nil {
 		discard()
 		return err
 	}

@@ -327,7 +327,19 @@ func cmdUsers() int {
 	fmt.Println("sing-box kullanıcıları:")
 	for _, inbound := range singbox.Inbounds(config) {
 		users := singbox.Users(inbound)
-		fmt.Printf("  %-14s %-10s :%d — %d kullanıcı\n", singbox.Tag(inbound), singbox.Type(inbound), singbox.Port(inbound), len(users))
+		names := make([]string, 0, len(users))
+		for _, user := range users {
+			name := singbox.StringField(user, "name")
+			if name == "" {
+				name = "-"
+			}
+			names = append(names, name)
+		}
+		fmt.Printf("  %-14s %-10s :%d — %d kullanıcı", singbox.Tag(inbound), singbox.Type(inbound), singbox.Port(inbound), len(users))
+		if len(names) > 0 {
+			fmt.Printf(" (%s)", strings.Join(names, ", "))
+		}
+		fmt.Println()
 	}
 	return 0
 }
@@ -345,7 +357,7 @@ func cmdBackup(args []string) int {
 	name := filepath.Join(dir, "vpnstack-"+time.Now().Format("20060102-150405")+".tar.gz")
 	file, err := os.Create(name)
 	if err != nil {
-		fmt.Println("yedeK oluşturulamadı:", err)
+		fmt.Println("yedek oluşturulamadı:", err)
 		return 1
 	}
 	defer file.Close()

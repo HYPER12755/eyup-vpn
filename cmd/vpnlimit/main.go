@@ -28,7 +28,12 @@ const (
 	defaultBotDB      = "/etc/bot/.bot.db"
 	defaultWwwRoot    = "/var/www/html"
 	statsTimeout      = 10 * time.Second
+	notifyTimeout     = 10 * time.Second
 )
+
+// notifyClient bounds the Telegram call so a slow API cannot stall a limiter
+// pass that otherwise keeps enforcing quotas for every other account.
+var notifyClient = &http.Client{Timeout: notifyTimeout}
 
 type app struct {
 	configPath string
@@ -232,7 +237,7 @@ func (a *app) notify(text string) {
 			continue
 		}
 		api := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", fields[1])
-		response, err := http.PostForm(api, url.Values{
+		response, err := notifyClient.PostForm(api, url.Values{
 			"chat_id":    {fields[2]},
 			"text":       {text},
 			"parse_mode": {"HTML"},
@@ -242,6 +247,9 @@ func (a *app) notify(text string) {
 			return
 		}
 		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			log.Printf("telegram bildirimi reddedildi: %s", response.Status)
+		}
 		return
 	}
 }
