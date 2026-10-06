@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -287,6 +288,30 @@ func TestTargetAddressNeverFallsBackToListenPort(t *testing.T) {
 func echoPort(t *testing.T, l net.Listener) int {
 	t.Helper()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestConnLimiter(t *testing.T) {
+	ctx := context.Background()
+
+	if !newLimiter(0).acquire(ctx) {
+		t.Fatal("nil limiter must always acquire")
+	}
+	newLimiter(0).release() // must not panic
+
+	limiter := newLimiter(2)
+	if !limiter.acquire(ctx) || !limiter.acquire(ctx) {
+		t.Fatal("first two acquires must succeed")
+	}
+	// The third acquire must not succeed while the two slots are held.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if limiter.acquire(cancelled) {
+		t.Fatal("acquire with cancelled context must fail")
+	}
+	limiter.release()
+	if !limiter.acquire(ctx) {
+		t.Fatal("acquire after release must succeed")
+	}
 }
 
 // readSwitch consumes the 101 status line and its header block.

@@ -52,3 +52,38 @@ func TestDetectWebSocket(t *testing.T) {
 		t.Fatal("masked binary frame must be detected")
 	}
 }
+
+func TestClosePayload(t *testing.T) {
+	if got := closePayload(nil); got != nil {
+		t.Fatalf("empty close must echo nil, got %x", got)
+	}
+	if got := closePayload([]byte{0x03}); got != nil {
+		t.Fatalf("short close payload must echo nil, got %x", got)
+	}
+	// A close carrying status 1000 (normal closure) echoes just the code.
+	if got := closePayload([]byte{0x03, 0xe8, 'b', 'y', 'e'}); !bytes.Equal(got, []byte{0x03, 0xe8}) {
+		t.Fatalf("close status not echoed: %x", got)
+	}
+}
+
+// writeFrame must select the 126 (16-bit) and 127 (64-bit) length encodings
+// correctly; only the <126 branch was exercised by TestFrameRoundTrip.
+func TestWriteFrameExtendedLengths(t *testing.T) {
+	for _, size := range []int{126, 65535, 65536, 1 << 20} {
+		payload := make([]byte, size)
+		for i := range payload {
+			payload[i] = byte(i)
+		}
+		var out bytes.Buffer
+		if err := writeFrame(&out, 0x2, payload); err != nil {
+			t.Fatalf("writeFrame(%d): %v", size, err)
+		}
+		opcode, decoded, err := readFrame(bufio.NewReader(&out))
+		if err != nil {
+			t.Fatalf("readFrame(%d): %v", size, err)
+		}
+		if opcode != 0x2 || !bytes.Equal(decoded, payload) {
+			t.Fatalf("round trip mismatch at %d bytes: opcode=%x len=%d", size, opcode, len(decoded))
+		}
+	}
+}

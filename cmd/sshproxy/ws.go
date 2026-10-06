@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const (
@@ -111,12 +113,23 @@ func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 	done := make(chan struct{}, 2)
 	frames := &frameWriter{w: client}
 
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
+	stop := make(chan struct{})
+	defer close(stop)
+	startIdleReaper(&lastActivity, stop, func() {
+		_ = client.Close()
+		_ = target.Close()
+	})
+
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buffer := make([]byte, bufLen)
 		for {
 			n, err := target.Read(buffer)
 			if n > 0 {
+				lastActivity.Store(time.Now().UnixNano())
 				if writeErr := frames.write(0x2, buffer[:n]); writeErr != nil {
 					return
 				}
@@ -134,9 +147,10 @@ func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 			if err != nil {
 				return
 			}
+			lastActivity.Store(time.Now().UnixNano())
 			switch opcode {
 			case 0x8:
-				_ = frames.write(0x8, nil)
+				_ = frames.write(0x8, closePayload(payload))
 				return
 			case 0x9:
 				if len(payload) > maxControlPayload {
@@ -160,6 +174,16 @@ func proxyWebSocket(client net.Conn, reader *bufio.Reader, target net.Conn) {
 	_ = client.Close()
 	_ = target.Close()
 	<-done
+}
+
+// closePayload builds the close frame echoed back when the peer initiates a
+// close. RFC 6455 §5.5.1: a close frame may carry a two-byte status code;
+// echoing it yields a well-formed close instead of an empty one.
+func closePayload(received []byte) []byte {
+	if len(received) >= 2 {
+		return received[:2]
+	}
+	return nil
 }
 
 func detectWebSocket(reader *bufio.Reader) bool {

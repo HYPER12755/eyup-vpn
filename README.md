@@ -111,7 +111,9 @@ another header's value (`Referer: .../X-Real-Host: evil`) is ignored.
 
 `sshproxy` and the REALITY inbounds bind `127.0.0.1` only — the public side is
 haproxy. SSH accounts live in the `sshvpn` group with shell `/bin/false`, so
-they can be used for tunneling but not for a login shell.
+they can be used for tunneling but not for a login shell. Concurrent tunnels
+are uncapped by default; cap them with `sshproxy --maxconns N` (or
+`SSHPROXY_MAX_CONNS`) to bound memory use under load.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full target-validation table.
 

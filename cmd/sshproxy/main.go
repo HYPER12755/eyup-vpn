@@ -2,29 +2,35 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"vpnstack/internal/version"
 )
 
 const (
-	bufLen        = 4096 * 4
-	maxHeadLen    = 64 * 1024
-	headerTimeout = 10 * time.Second
-	splitTimeout  = 2 * time.Second
-	selectTimeout = 3 * time.Second
-	idleTicks     = 60
-	defaultHost   = "127.0.0.1:109"
-	pass          = ""
+	bufLen          = 4096 * 4
+	maxHeadLen      = 64 * 1024
+	headerTimeout   = 10 * time.Second
+	splitTimeout    = 2 * time.Second
+	selectTimeout   = 3 * time.Second
+	idleTicks       = 60
+	defaultHost     = "127.0.0.1:109"
+	pass            = ""
+	keepAlivePeriod = 60 * time.Second
+	shutdownGrace   = 10 * time.Second
 )
 
 func buildResponse(head string) []byte {
@@ -41,6 +47,7 @@ func buildResponse(head string) []byte {
 func main() {
 	listenAddr := "127.0.0.1"
 	listenPort := 10015
+	maxConns := 0
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -63,11 +70,21 @@ func main() {
 					listenPort = parsed
 				}
 			}
+		case "--maxconns":
+			if i+1 < len(args) {
+				i++
+				if parsed, err := strconv.Atoi(args[i]); err == nil {
+					maxConns = parsed
+				}
+			}
 		default:
 			if parsed, err := strconv.Atoi(args[i]); err == nil {
 				listenPort = parsed
 			}
 		}
+	}
+	if maxConns == 0 {
+		maxConns = envInt("SSHPROXY_MAX_CONNS", 0)
 	}
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(listenAddr, strconv.Itoa(listenPort)))
@@ -76,26 +93,103 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("sshproxy started", "version", version.Full(), "addr", listenAddr, "port", listenPort)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
+	slog.Info("sshproxy started", "version", version.Full(), "addr", listenAddr, "port", listenPort, "maxconns", maxConns)
+
+	serve(ctx, listener, listenPort, maxConns)
+}
+
+// serve accepts and relays connections until ctx is cancelled, then lets
+// in-flight tunnels drain for up to shutdownGrace before the process exits.
+func serve(ctx context.Context, listener net.Listener, listenPort, maxConns int) {
+	limiter := newLimiter(maxConns)
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	var wg sync.WaitGroup
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				continue
 			}
 			slog.Error("sshproxy: accept failed", "err", err)
-			return
+			break
 		}
-		go handleConn(conn, listenPort)
+		if !limiter.acquire(ctx) {
+			_ = conn.Close()
+			continue
+		}
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer limiter.release()
+			handleConn(c, listenPort)
+		}(conn)
 	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		slog.Info("sshproxy: stopped")
+	case <-time.After(shutdownGrace):
+		slog.Warn("sshproxy: shutdown deadline reached, dropping active connections")
+	}
+}
+
+// connLimiter caps concurrent connections with a counting semaphore. A nil
+// limiter means no cap.
+type connLimiter chan struct{}
+
+func newLimiter(max int) connLimiter {
+	if max <= 0 {
+		return nil
+	}
+	return make(connLimiter, max)
+}
+
+func (l connLimiter) acquire(ctx context.Context) bool {
+	if l == nil {
+		return true
+	}
+	select {
+	case l <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (l connLimiter) release() {
+	if l != nil {
+		<-l
+	}
+}
+
+func envInt(key string, fallback int) int {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func printUsage() {
 	fmt.Println("Usage: sshproxy [port]")
 	fmt.Println("       sshproxy -p <port>")
 	fmt.Println("       sshproxy -b <bindAddr> -p <port>")
+	fmt.Println("       sshproxy --maxconns <n>     (0 = unlimited, default)")
 	fmt.Println("       sshproxy -b 0.0.0.0 -p 80")
 }
 
@@ -121,6 +215,7 @@ func readHead(reader *bufio.Reader, conn net.Conn) (string, error) {
 }
 
 func handleConn(client net.Conn, listenPort int) {
+	setKeepAlive(client)
 	reader := bufio.NewReader(client)
 
 	head, err := readHead(reader, client)
@@ -167,6 +262,7 @@ func handleConn(client net.Conn, listenPort int) {
 		_ = client.Close()
 		return
 	}
+	setKeepAlive(target)
 	defer target.Close()
 	defer client.Close()
 
@@ -278,6 +374,22 @@ func proxy(client net.Conn, clientReader io.Reader, target net.Conn) {
 
 	stop := make(chan struct{})
 	defer close(stop)
+	startIdleReaper(&lastActivity, stop, func() {
+		_ = client.Close()
+		_ = target.Close()
+	})
+
+	<-done
+	_ = client.Close()
+	_ = target.Close()
+	<-done
+}
+
+// startIdleReaper closes both ends of a relay once no byte has moved for
+// selectTimeout*idleTicks. It gives the WebSocket path the same idle bound the
+// raw path always had, so an idle tunnel cannot pin a goroutine forever when
+// haproxy's tunnel timeout is absent (e.g. direct :10015 use).
+func startIdleReaper(lastActivity *atomic.Int64, stop <-chan struct{}, closeAll func()) {
 	go func() {
 		ticker := time.NewTicker(selectTimeout)
 		defer ticker.Stop()
@@ -286,20 +398,22 @@ func proxy(client net.Conn, clientReader io.Reader, target net.Conn) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				last := time.Unix(0, lastActivity.Load())
-				if time.Since(last) > selectTimeout*idleTicks {
-					_ = client.Close()
-					_ = target.Close()
+				if time.Since(time.Unix(0, lastActivity.Load())) > selectTimeout*idleTicks {
+					closeAll()
 					return
 				}
 			}
 		}
 	}()
+}
 
-	<-done
-	_ = client.Close()
-	_ = target.Close()
-	<-done
+func setKeepAlive(conn net.Conn) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcp.SetKeepAlive(true)
+	_ = tcp.SetKeepAlivePeriod(keepAlivePeriod)
 }
 
 func copyStream(dst net.Conn, src io.Reader, lastActivity *atomic.Int64, done chan<- struct{}) {

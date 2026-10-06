@@ -122,7 +122,7 @@ Once framed, the relay translates:
 - client `0x1`/`0x2` (text/binary) → written to the target as-is
 - client `0x9` (ping) → answered `0xA` (pong) with the same payload
 - client `0xA` (pong) → ignored
-- client `0x8` (close) → `0x8` sent back, both sides closed
+- client `0x8` (close) → `0x8` sent back with the status code echoed, both sides closed
 - target bytes → client as binary frames
 
 Incoming frames are masked (RFC 6455 requires it from clients); frames sent to
@@ -153,15 +153,21 @@ client ──head──► sshproxy ──dial 10s──► target (dropbear/ssh
 | Header read deadline | 10 s |
 | Dial timeout | 10 s |
 | Frame sniff timeout | 2 s |
-| Raw relay idle timeout | 180 s (no traffic → both sides closed) |
+| Relay idle timeout | 180 s (no traffic → both sides closed) |
+| TCP keepalive | on, 60 s period (both client and target) |
+| Concurrent connections | unlimited unless `--maxconns` (or `SSHPROXY_MAX_CONNS`) |
+| Shutdown drain | up to 10 s after SIGTERM/SIGINT |
 | haproxy `timeout client`/`server` | 1 m |
 | haproxy `timeout tunnel` | 1 h |
 
-The **raw** relay reaps idle connections after 3 minutes (checked every 3 s).
-The **WebSocket** relay has no idle timer of its own — it relies on haproxy's
-`timeout tunnel 1h`. An SSH session that sits idle past haproxy's tunnel timeout
-will drop; haproxy's `timeout client`/`server` of 1 m only applies to
-inactivity *before* the tunnel is established.
+Both the **raw** and the **WebSocket** relay reap idle connections after
+3 minutes (checked every 3 s). The WebSocket path used to rely on haproxy's
+`timeout tunnel 1h` alone; it now enforces the same 180 s bound itself, so an
+idle tunnel cannot pin a goroutine when a client talks to `:10015` directly.
+TCP keepalive (60 s) is enabled on both sides so dead peers are detected
+without traffic. `sshproxy` drains in-flight tunnels for up to 10 s on
+SIGTERM/SIGINT, then exits; systemd sends SIGTERM, so `systemctl restart ws`
+no longer RSTs live sessions immediately.
 
 ## Verifying by hand
 
