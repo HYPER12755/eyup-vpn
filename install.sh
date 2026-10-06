@@ -326,6 +326,12 @@ if [[ ! -f /etc/xray/xray.crt || ! -f /etc/xray/xray.key ]]; then
   CERT_SOURCE="self-signed (CN=${CERT_CN})"
   ok "Self-signed sertifika üretildi (CN=${CERT_CN}); gerçek sertifika için VPNSTACK_CERT_PATH/KEY_PATH verin."
 fi
+# Xray bazı kurulumlarda www-data olarak çalışır (legacy unit); anahtarı grup
+# okunur yap ki hem root hem www-data birimleri sertifikayı okuyabilsin.
+if id -u www-data >/dev/null 2>&1; then
+  chown root:www-data /etc/xray/xray.key 2>/dev/null || true
+  chmod 0640 /etc/xray/xray.key
+fi
 
 # SSH tüneli destek dosyaları: grup ve eski köprünün yedeği.
 getent group sshvpn >/dev/null 2>&1 || groupadd -f sshvpn >/dev/null 2>&1 || true
@@ -368,10 +374,73 @@ HAPROXY_PROFILE="${VPNSTACK_HAPROXY_PROFILE:-reality}"
 case "${HAPROXY_PROFILE}" in
   reality) HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.cfg" ;;
   legacy)  HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.legacy.cfg" ;;
-  *) die "VPNSTACK_HAPROXY_PROFILE=${HAPROXY_PROFILE} geçersiz (reality|legacy)." ;;
+  hybrid)  HAPROXY_SRC="${STACK_DIR}/deploy/haproxy.hybrid.cfg" ;;
+  *) die "VPNSTACK_HAPROXY_PROFILE=${HAPROXY_PROFILE} geçersiz (reality|legacy|hybrid)." ;;
 esac
+
+# hybrid profil: 443'ü SNI'ye göre dağıtır. REALITY rotaları sing-box
+# yapılandırmasından üretilir; alan adı TLS'ı Xray sonlandırır.
+render_hybrid_haproxy() {
+  python3 - "${SINGBOX_CONFIG}" "$1" "$2" "${DOMAIN:-}" <<'PY'
+import json, sys
+config_path, src, dst, domain = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(config_path) as handle:
+        config = json.load(handle)
+except Exception:
+    config = {}
+entries = []
+for inbound in config.get("inbounds", []):
+    tls = inbound.get("tls") or {}
+    reality = tls.get("reality") or {}
+    sni = (reality.get("handshake") or {}).get("server") or tls.get("server_name") or ""
+    port = inbound.get("listen_port")
+    tag = str(inbound.get("tag") or "")
+    if not sni or not port:
+        continue
+    # Aynı SNI'yı paylaşan düğümlerden REALITY olan kazanır; düz TLS düğümü
+    # aksi halde 443'ü gereksizce kapardı.
+    priority = 0 if "reality" in tls else 1
+    entries.append((priority, sni, port, tag))
+routes, backends, seen = [], [], set()
+for _priority, sni, port, tag in sorted(entries, key=lambda item: item[0]):
+    if sni in seen:
+        continue
+    seen.add(sni)
+    safe = "".join(ch if ch.isalnum() else "_" for ch in tag) or ("node_%s" % port)
+    routes.append("    acl sni_%s req.ssl_sni -i %s" % (safe, sni))
+    routes.append("    use_backend re_%s_backend if sni_%s" % (safe, safe))
+    backends.append("backend re_%s_backend\n    mode tcp\n    server %s_node 127.0.0.1:%s check\n" % (safe, safe, port))
+text = open(src).read()
+if domain:
+    text = text.replace("#__DOMAIN_ROUTE__", "    use_backend xray_tls_backend if { req.ssl_sni -i %s }" % domain)
+else:
+    text = text.replace("#__DOMAIN_ROUTE__", "    # domain bilinmiyor; 443 doğrudan Xray TLS'e gider")
+text = text.replace("#__REALITY_ROUTES__", "\n".join(routes) if routes else "    # REALITY düğümü yok; 443 doğrudan Xray TLS'e gider")
+text = text.replace("#__REALITY_BACKENDS__", "\n".join(backends) if backends else "# REALITY düğümü yok")
+with open(dst, "w") as handle:
+    handle.write(text)
+PY
+}
+
 HAPROXY_DST="/etc/haproxy/haproxy.cfg"
-if [[ "${HAPROXY_PROFILE}" == "legacy" ]]; then
+if [[ "${HAPROXY_PROFILE}" == "hybrid" ]]; then
+  if [[ -f "${HAPROXY_DST}" ]]; then
+    cp -a "${HAPROXY_DST}" "${HAPROXY_DST}.vpnstack-backup"
+    log "Mevcut haproxy.cfg yedeklendi: ${HAPROXY_DST}.vpnstack-backup"
+  fi
+  HAPROXY_RENDERED="$(mktemp)"
+  render_hybrid_haproxy "${HAPROXY_SRC}" "${HAPROXY_RENDERED}"
+  install -m 0644 "${HAPROXY_RENDERED}" "${HAPROXY_DST}"
+  rm -f "${HAPROXY_RENDERED}"
+  # 443 passthrough olduğu için hap.pem yalnızca 8443/2096/2087 içindir.
+  if [[ -f /etc/xray/xray.crt && -f /etc/xray/xray.key ]]; then
+    cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/haproxy/hap.pem
+    chmod 600 /etc/haproxy/hap.pem
+    ok "hap.pem üretildi (8443/2096/2087 TLS)."
+  fi
+  ok "haproxy.cfg hybrid profille kuruldu (443: SNI paylaşımı, Xray TLS + REALITY)."
+elif [[ "${HAPROXY_PROFILE}" == "legacy" ]]; then
   if [[ -f "${HAPROXY_DST}" ]]; then
     cp -a "${HAPROXY_DST}" "${HAPROXY_DST}.vpnstack-backup"
     log "Mevcut haproxy.cfg yedeklendi: ${HAPROXY_DST}.vpnstack-backup"
@@ -590,10 +659,14 @@ XRAY_CONFIG_CHANGED=false
 if [[ ! -s /etc/xray/config.json ]]; then
   # The template is the marker-based layout the legacy manager expects: users
   # live between #& user lines and each protocol has an insertion marker
-  # (#vless, #vmess, ...).
+  # (#vless, #vmess, ...). It also carries the tls-fallback inbound (10443)
+  # that the hybrid profile routes 443 traffic into.
   install -m 0644 "${STACK_DIR}/deploy/xray.config.json" /etc/xray/config.json
   XRAY_CONFIG_CHANGED=true
   ok "Xray config şablonu kuruldu: /etc/xray/config.json"
+fi
+if [[ "${HAPROXY_PROFILE}" == "hybrid" ]] && ! grep -q '"tls-fallback"' /etc/xray/config.json 2>/dev/null; then
+  warn "hybrid profilde 443 için /etc/xray/config.json içinde tls-fallback inbound'u (port 10443) gerekir; deploy/xray.config.json'daki bloğu ekleyip xray'i yeniden başlatın."
 fi
 if [[ ! -f /etc/systemd/system/xray.service ]]; then
   cat > /etc/systemd/system/xray.service <<EOF

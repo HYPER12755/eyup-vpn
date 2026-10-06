@@ -134,6 +134,40 @@
           "serviceName": "trojan-grpc"
         }
       }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 10443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "10443fa1-1ba6-4b6c-9d1b-000000000000",
+            "email": "tls-fallback"
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": [
+          { "path": "/vless", "dest": 10001 },
+          { "path": "/vmess", "dest": 10002 },
+          { "path": "/trojan-ws", "dest": 10003 },
+          { "alpn": "h2", "dest": 10005 },
+          { "dest": 143 }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/xray/xray.crt",
+              "keyFile": "/etc/xray/xray.key"
+            }
+          ]
+        }
+      },
+      "tag": "tls-fallback"
     }
   ],
   "outbounds": [
