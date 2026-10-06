@@ -33,6 +33,14 @@ On a server that already runs a legacy multi-protocol layout (TLS terminated by 
 sudo VPNSTACK_HAPROXY_PROFILE=legacy bash install.sh
 ```
 
+To share the same ports between everything — Xray, sing-box REALITY and SSH — use the hybrid profile. 443 becomes SNI routing without TLS termination: REALITY node SNIs pass straight through to sing-box, your domain goes to Xray's TLS fallback inbound (WebSocket paths, gRPC by ALPN, everything else to dropbear for SSH-over-TLS), while 8443/2096/2087 keep the terminated layout:
+
+```bash
+sudo VPNSTACK_HAPROXY_PROFILE=hybrid bash install.sh
+```
+
+With hybrid, a REALITY client can point its link at port 443 instead of the node's local listen port; the SNI stays the node's camouflage domain.
+
 The installer resolves the domain and TLS certificate automatically when they
 already exist on the server: `/etc/xray/xray.crt|key`, `/etc/haproxy/hap.pem`
 (split into cert+key), `/etc/letsencrypt/live/*`, `~/.acme.sh/*` and

@@ -46,6 +46,8 @@ sudo VPNSTACK_HAPROXY_PROFILE=legacy bash install.sh
 
 The legacy profile comes from `deploy/haproxy.legacy.cfg`; an existing config is backed up to `.vpnstack-backup` first. It needs `/etc/haproxy/hap.pem` for 443 and cannot coexist with the REALITY frontend, since both bind 443.
 
+The hybrid profile (`VPNSTACK_HAPROXY_PROFILE=hybrid`, `deploy/haproxy.hybrid.cfg`) solves that conflict: 443 does **not** terminate TLS, it routes by SNI — REALITY node SNIs go to sing-box, the domain goes to Xray's `tls-fallback` inbound on 10443 (WS paths, gRPC by ALPN, default → dropbear for SSH-over-TLS), and 8443/2096/2087 still terminate TLS like the legacy layout. REALITY routes are generated from the sing-box config at install time; a REALITY client link just changes its port to 443 (the SNI stays the camouflage domain). Re-run the installer to regenerate the routes after adding nodes.
+
 To derive a new config after updating the source file:
 
 ```bash
