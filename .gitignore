@@ -4,3 +4,5 @@ dist/
 *.log
 .env
 session-ses_*.md
+__pycache__/
+*.pyc

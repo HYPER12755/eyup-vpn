@@ -8,7 +8,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-GROUP="sshvpn"
+GROUP="${SSH_ACCOUNT_GROUP:-sshvpn}"
 SSH_PORT_PUBLIC="80"
 SSH_PORT_DIRECT="10015"
 SSH_TARGET="127.0.0.1:109"
@@ -20,12 +20,50 @@ REALITY_PORT_MAX=1499
 MENU_CONF="/etc/sshvpn/menu.conf"
 DEFAULT_HOST="can.vps-mosto.site"
 DOMAIN_FILE="/etc/xray/domain"
-XRAY_PANEL_BIN="/usr/local/bin/va"
 FAKE_HOST=""
 EXTRA_HEADER=""
 SERVER_IP_CACHE=""
 
 [[ "${EUID}" -eq 0 ]] || { echo -e "${RED}Bu menü root olarak çalıştırılmalıdır.${NC}"; exit 1; }
+
+# --- kutu çizimi: Türkçe karakterler bayt değil karakter sayılır, aksi halde
+# --- hizalama kayar (printf %-Ns bayta göre dolgu yapar).
+BOX_WIDTH=56
+
+box_rule() {
+  local left="$1" mid="$2" right="$3" i
+  printf '  %s' "${left}"
+  for ((i = 0; i < BOX_WIDTH; i++)); do printf '%s' "${mid}"; done
+  printf '%s\n' "${right}"
+}
+
+box_top()    { box_rule "┌" "─" "┐"; }
+box_mid()    { box_rule "├" "─" "┤"; }
+box_bottom() { box_rule "└" "─" "┘"; }
+
+visible_len() {
+  local clean
+  clean="$(printf '%s' "$1" | sed -r 's/\x1b\[[0-9;]*m//g')"
+  echo "${#clean}"
+}
+
+box_line() {
+  local text="$1" pad len
+  len="$(visible_len "${text}")"
+  pad=$((BOX_WIDTH - 1 - len))
+  ((pad < 0)) && pad=0
+  printf '  │ %s%*s│\n' "${text}" "${pad}" ""
+}
+
+box_center() {
+  local text="$1" left right len
+  len="$(visible_len "${text}")"
+  left=$(( (BOX_WIDTH - len) / 2 ))
+  ((left < 1)) && left=1
+  right=$((BOX_WIDTH - len - left))
+  ((right < 0)) && right=0
+  printf '  │%*s%s%*s│\n' "${left}" "" "${text}" "${right}" ""
+}
 
 load_menu_conf() {
   if [[ -f "${MENU_CONF}" ]]; then
@@ -77,37 +115,37 @@ load_domain_from_menu_conf() {
   done < "${MENU_CONF}"
 }
 
-service_badge() {
+status_line() {
   local label="$1"
   shift
-  local unit
+  local unit state
+  state="${RED}● kapalı${NC}"
   for unit in "$@"; do
     if systemctl is-active --quiet "${unit}" 2>/dev/null; then
-      printf '  │ %-12s %b\n' "${label}" "${GREEN}● açık${NC}"
-      return
+      state="${GREEN}● açık${NC}"
+      break
     fi
   done
-  printf '  │ %-12s %b\n' "${label}" "${RED}● kapalı${NC}"
+  box_line "$(echo -e "$(printf '%-10s' "${label}") ${state}")"
 }
 
 print_banner() {
   local domain ip
   domain="$(server_domain)"
   ip="$(server_ip)"
-  echo -e "${CYAN}${BOLD}"
-  echo "  ╔════════════════════════════════════════════════════════╗"
-  echo "  ║                BABA YÖNETİM PANELİ  ·  VPN STACK       ║"
-  echo "  ╚════════════════════════════════════════════════════════╝"
-  echo -e "${NC}"
-  echo -e "  Sunucu : ${GREEN}${domain:-$(hostname)}${NC} ${CYAN}(${ip})${NC}"
-  echo -e "  SSH    : ${GREEN}80${NC} → ws/sshproxy · ${GREEN}10015${NC} yedek" 
-  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  service_badge "ws" ws.service
-  service_badge "haproxy" haproxy.service
-  service_badge "sing-box" sing-box.service
-  service_badge "xray" xray.service
-  service_badge "dropbear" dropbear.service dropbear-vpnstack.service
-  echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo
+  box_top
+  box_center "$(echo -e "${BOLD}BABA YÖNETİM PANELİ${NC}")"
+  box_mid
+  box_line "$(echo -e "Sunucu : ${GREEN}${domain:-$(hostname)}${NC} (${ip})")"
+  box_line "$(echo -e "SSH    : ${GREEN}80${NC} → ws/sshproxy · ${GREEN}10015${NC} yedek")"
+  box_mid
+  status_line "ws" ws.service
+  status_line "haproxy" haproxy.service
+  status_line "sing-box" sing-box.service
+  status_line "xray" xray.service
+  status_line "dropbear" dropbear.service dropbear-vpnstack.service
+  box_bottom
 }
 
 ensure_group() {
@@ -258,9 +296,22 @@ client_settings() {
   echo -e "${GREEN}Kaydedildi.${NC}"
 }
 
+group_members() {
+  # Hem birincil grubu ${GROUP} olan hesaplar (eski scriptler böyle açıyor)
+  # hem de grup üye listesi döner; yalnızca üye listesine bakmak legacy
+  # hesapları görünmez kılıyordu.
+  local group="$1" gid
+  gid="$(getent group "${group}" 2>/dev/null | cut -d: -f3)"
+  [[ -n "${gid}" ]] || return
+  {
+    getent group "${group}" | awk -F: '{print $4}' | tr ',' '\n'
+    getent passwd | awk -F: -v g="${gid}" '$4==g {print $1}'
+  } | grep -v '^$' | sort -u
+}
+
 list_accounts() {
   local members
-  members="$(getent group "${GROUP}" 2>/dev/null | awk -F: '{print $4}')"
+  members="$(group_members "${GROUP}")"
   if [[ -z "${members}" ]]; then
     echo -e "${YELLOW}Henüz SSH hesabı yok.${NC}"
     return
@@ -270,17 +321,18 @@ list_accounts() {
   printf "${BOLD}%-12s %-12s %-10s %s${NC}\n" "KULLANICI" "DURUM" "ŞİFRE" "BİTİŞ"
   echo "------------------------------------------------------------"
   local user status
-  for user in ${members//,/ }; do
+  while read -r user; do
+    [[ -n "${user}" ]] || continue
     status="$(passwd -S "${user}" 2>/dev/null | awk '{print $2}')"
-    [[ "${status}" == "P" ]] && status="${GREEN}aktif${NC}" || status="${RED}kilitli${NC}"
-    printf "%-12s %-22s %-10s %s\n" "${user}" "${status}" "***" "$(account_expiry "${user}")"
-  done
+    [[ "${status}" == "P" ]] && status="aktif" || status="kilitli"
+    printf "%-12s %-12s %-10s %s\n" "${user}" "${status}" "***" "$(account_expiry "${user}")"
+  done <<< "${members}"
   echo
 }
 
 delete_account() {
   local members
-  members="$(getent group "${GROUP}" 2>/dev/null | awk -F: '{print $4}')"
+  members="$(group_members "${GROUP}")"
   if [[ -z "${members}" ]]; then
     echo -e "${YELLOW}Silinecek hesap yok.${NC}"
     return
@@ -295,7 +347,7 @@ delete_account() {
   fi
   # Yalnızca ${GROUP} üyesi silinebilir; aksi halde bir yazım hatası sistem
   # hesabını siler.
-  if [[ ",${members// /}," != *",${username},"* ]]; then
+  if ! grep -qx "${username}" <<< "${members}"; then
     echo -e "${RED}${username}, ${GROUP} grubunda değil — silinmedi.${NC}"
     return
   fi
@@ -312,9 +364,9 @@ service_menu() {
   local unit
   for unit in ws.service ws-ovpn.service haproxy.service sing-box.service xray.service dropbear.service dropbear-vpnstack.service; do
     if systemctl is-active --quiet "${unit}" 2>/dev/null; then
-      printf " %-24s : %s\n" "${unit}" "${GREEN}aktif${NC}"
+      printf " %-26s : %b\n" "${unit}" "${GREEN}aktif${NC}"
     else
-      printf " %-24s : %s\n" "${unit}" "${RED}kapalı${NC}"
+      printf " %-26s : %b\n" "${unit}" "${RED}kapalı${NC}"
     fi
   done
   echo
@@ -349,19 +401,18 @@ system_info() {
   echo
 }
 
-run_xray_panel() {
-  if [[ ! -x "${XRAY_PANEL_BIN}" ]]; then
-    echo -e "${RED}Xray paneli kurulu değil (${XRAY_PANEL_BIN}). install.sh çalıştırın.${NC}"
+run_xray_menu() {
+  local bin=""
+  if [[ -x /usr/local/bin/xraymenu ]]; then
+    bin=/usr/local/bin/xraymenu
+  elif [[ -x "$(dirname "${BASH_SOURCE[0]}")/xraymenu.sh" ]]; then
+    bin="$(dirname "${BASH_SOURCE[0]}")/xraymenu.sh"
+  fi
+  if [[ -z "${bin}" ]]; then
+    echo -e "${RED}xraymenu bulunamadı (install.sh çalıştırın).${NC}"
     return 1
   fi
-  echo -e "${YELLOW}Not: v2ray-agent kendi kurulum ve servis düzenini yönetir;${NC}"
-  echo -e "${YELLOW}mevcut haproxy (80/443), sing-box ve sshproxy yapılandırmasını değiştirebilir.${NC}"
-  echo -e "${YELLOW}Üretimde önce: vpnctl backup${NC}"
-  local answer
-  read -r -p "$(echo -e "${CYAN}Xray paneli açılsın mı? (e/H):${NC} ")" answer
-  if [[ "${answer}" =~ ^[eEyY]$ ]]; then
-    bash "${XRAY_PANEL_BIN}"
-  fi
+  bash "${bin}"
 }
 
 run_singbox_manager() {
@@ -585,17 +636,20 @@ singbox_menu() {
 }
 
 menu() {
-  echo -e "${CYAN}${BOLD}"
-  echo "  ╔════════════════════════════════════════════════════════╗"
-  echo "  ║                      İŞLEM MENÜSÜ                      ║"
-  echo "  ╠════════════════════════════════════════════════════════╣"
-  echo "  ║  [1] SSH Hesabı Oluştur      [5] Sistem Bilgisi        ║"
-  echo "  ║  [2] Hesapları Listele       [6] Xray Yönetimi (va)    ║"
-  echo "  ║  [3] Hesap Sil               [7] Sing-box Manager      ║"
-  echo "  ║  [4] Servisler               [8] İstemci Ayarları      ║"
-  echo "  ║  [0] Çıkış                                             ║"
-  echo "  ╚════════════════════════════════════════════════════════╝"
-  echo -e "${NC}"
+  echo
+  box_top
+  box_center "$(echo -e "${BOLD}İŞLEM MENÜSÜ${NC}")"
+  box_mid
+  box_line "[1] SSH Hesabı Oluştur"
+  box_line "[2] Hesapları Listele"
+  box_line "[3] Hesap Sil"
+  box_line "[4] Servisler"
+  box_line "[5] Sistem Bilgisi"
+  box_line "[6] Xray Yönetimi"
+  box_line "[7] Sing-box Manager"
+  box_line "[8] İstemci Ayarları (Host/Header)"
+  box_line "[0] Çıkış"
+  box_bottom
 }
 
 while true; do
@@ -608,7 +662,7 @@ while true; do
     3) delete_account ;;
     4) service_menu ;;
     5) system_info ;;
-    6) run_xray_panel ;;
+    6) run_xray_menu ;;
     7) run_singbox_manager ;;
     8) client_settings ;;
     0) echo -e "${GREEN}Çıkılıyor.${NC}"; exit 0 ;;

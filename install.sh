@@ -38,7 +38,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 log "Sistem bağımlılıkları kuruluyor..."
 apt-get update -y -qq
-apt-get install -y -qq curl wget git sudo ufw ca-certificates openssl jq unzip tar haproxy net-tools fail2ban >/dev/null
+apt-get install -y -qq curl wget git sudo ufw ca-certificates openssl jq unzip tar haproxy net-tools fail2ban python3 >/dev/null
 ok "Bağımlılıklar kuruldu."
 
 ufw allow 22/tcp >/dev/null 2>&1 || true
@@ -190,7 +190,9 @@ CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/sblink 
 CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o /usr/local/bin/vpnctl ./cmd/vpnctl
 install -m 0755 "${STACK_DIR}/scripts/vpnmenu.sh" /usr/local/bin/vpnmenu
 ln -sf /usr/local/bin/vpnmenu /usr/local/bin/baba
-ok "Kuruldu: sshproxy + sblink + vpnctl + vpnmenu (baba)"
+install -m 0755 "${STACK_DIR}/scripts/xraymenu.sh" /usr/local/bin/xraymenu
+install -m 0755 "${STACK_DIR}/scripts/xraycfg.py" /usr/local/bin/xraycfg
+ok "Kuruldu: sshproxy + sblink + vpnctl + vpnmenu (baba) + xraymenu/xraycfg"
 
 # ---------------------------------------------------------- Keşif ve sahiplenme
 # Üzerine kurulum yapılan sunucuda sertifika ve SSH tüneli dosyaları zaten
@@ -667,7 +669,7 @@ echo -e "${GREEN}          VPN STACK KURULUMU TAMAMLANDI        ${NC}"
 echo -e "${GREEN}===============================================${NC}"
 echo -e " Sürüm           : ${GREEN}${VERSION}${NC}"
 echo -e " Terminal Menü   : ${GREEN}baba${NC} (veya vpnmenu)"
-echo -e " Xray Paneli     : ${GREEN}va${NC} · ${GREEN}systemctl status xray${NC}"
+echo -e " Xray Menü       : ${GREEN}baba [6]${NC} · ${GREEN}xraymenu${NC} · panel: ${GREEN}va${NC}"
 echo -e " Sing-box Menü   : ${GREEN}singbox${NC}"
 echo -e " Sağlık Kontrolü : ${GREEN}vpnctl doctor${NC}"
 echo -e " Sunucu IP       : ${GREEN}${SERVER_IP}${NC}"
